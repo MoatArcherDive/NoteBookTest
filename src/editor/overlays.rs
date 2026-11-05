@@ -305,7 +305,7 @@ impl Editor {
         self.probes.borrow_mut().clear();
         self.callout_zone.borrow_mut().clear();
         let mut out = vec![];
-        if self.read_only {
+        if self.read_only && !matches!(self.menu, Some(Menu::Emoji { target: super::emoji_picker::EmojiTarget::DocIcon, .. })) {
             return out;
         }
         let menu_el = match self.menu.clone() {

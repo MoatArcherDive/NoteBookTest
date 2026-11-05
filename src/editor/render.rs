@@ -232,6 +232,14 @@ pub(crate) fn equation_numbers(doc: &crate::model::Document) -> HashMap<BlockId,
     });
     out
 }
+fn zoomed_text(mut spec: TextSpec) -> TextSpec {
+    let zoom = crate::settings::document_zoom();
+    spec.size *= zoom;
+    spec.line_height *= zoom;
+    spec.letter_spacing *= zoom;
+    spec
+}
+
 
 impl R<'_> {
     fn text_el(&self, id: BlockId, text: &RichText, mut spec: TextSpec, align: Align, placeholder: Option<SharedString>) -> RichTextElement {
@@ -272,7 +280,7 @@ impl R<'_> {
     }
 
     fn spec_for(&self, b: &Block, env: Env) -> TextSpec {
-        if crate::settings::feishu() { return self.spec_for_feishu(b, env); }
+        if crate::settings::feishu() { return zoomed_text(self.spec_for_feishu(b, env)); }
 
         let st = theme::style();
         let mut spec = TextSpec::body();
@@ -301,7 +309,7 @@ impl R<'_> {
             spec.color = Theme::todo_done();
             spec.strike_all = st.flag("done.strike");
         }
-        spec
+        zoomed_text(spec)
     }
 
     /// A column of sibling blocks with collapsed margins and heading folding.
@@ -738,8 +746,9 @@ impl R<'_> {
         let id = b.id;
         let g = SharedString::from(format!("code-{}", id.0));
         let st = theme::style();
-        let (code_size, code_line, radius) = (st.num("pre.size"), st.num("pre.line"), st.num("pre.radius"));
-        let gutter_w = if st.flag("pre.numbers") { GUTTER_W } else { 0. };
+        let zoom = crate::settings::document_zoom();
+        let (code_size, code_line, radius) = (st.num("pre.size") * zoom, st.num("pre.line") * zoom, st.num("pre.radius"));
+        let gutter_w = if st.flag("pre.numbers") { GUTTER_W * zoom.max(1.) } else { 0. };
         // SF Mono 13 on a 20pt line.
         let spec = TextSpec {
             size: code_size,
@@ -1001,7 +1010,7 @@ impl R<'_> {
                                 .flex_col()
                                 .items_end()
                                 .font_family(theme::MONO_FONT)
-                                .text_size(px(12.))
+                                .text_size(px(12. * zoom))
                                 .line_height(px(code_line))
                                 .text_color(Theme::code_line_number())
                                 .children(
@@ -1104,6 +1113,7 @@ impl Editor {
         }
         self.items = items;
         self.item_keys = keys;
+        if let Some(offset) = self.restore_scroll.take() { self.list.scroll_to(offset); }
     }
 
     /// The list item showing `id` (the deepest row on its path).
@@ -1163,7 +1173,7 @@ impl Editor {
                             .flex()
                             .items_start()
                             .children(self.doc_icon_el(cx))
-                            .child(div().flex_1().min_w_0().child(r.text_el(TITLE, &self.core.doc.title, spec, Align::Left, Some(crate::settings::text("请输入标题").into())))),
+                            .child(div().flex_1().min_w_0().child(r.text_el(TITLE, &self.core.doc.title, zoomed_text(spec), Align::Left, Some(crate::settings::text("请输入标题").into())))),
                     )
                     .into_any_element()
             }
@@ -1986,9 +1996,11 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
 
         let id = b.id;
         let g = SharedString::from(format!("code-{}", id.0));
+        let zoom = crate::settings::document_zoom();
+        let code_line = 22. * zoom;
         let spec = TextSpec {
-            size: 14.,
-            line_height: 22.,
+            size: 14. * zoom,
+            line_height: code_line,
             weight: FontWeight::NORMAL,
             color: Theme::text_code(),
             mono: true,
@@ -2222,20 +2234,20 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                             // Number box spans x 0..36 of the outer block, text starts at 60.
                             div()
                                 .flex_none()
-                                .w(px(35.))
+                                .w(px(35. * zoom.max(1.)))
                                 .mr(px(24.))
                                 .flex()
                                 .flex_col()
                                 .items_end()
                                 .font_family(theme::MONO_FONT)
-                                .text_size(px(14.))
-                                .line_height(px(22.))
+                                .text_size(px(14. * zoom))
+                                .line_height(px(code_line))
                                 .text_color(Theme::text_caption())
                                 .children(
                                     rows_per_line
                                         .iter()
                                         .enumerate()
-                                        .map(|(i, n)| div().h(px(22. * *n as f32)).child(format!("{}", i + 1))),
+                                        .map(|(i, n)| div().h(px(code_line * *n as f32)).child(format!("{}", i + 1))),
                                 ),
                         )
                         .child(div().flex_1().min_w_0().overflow_hidden().child(el)),

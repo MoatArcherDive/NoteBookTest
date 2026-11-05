@@ -29,6 +29,8 @@ diff -ru $R/taffy-0.9.0/src vendor/taffy/src
 | 11 | `window.rs` | `DispatchEventResult` 改为 `pub`（`Window::dispatch_event` 的返回类型） | devtools 回放事件时调用 `dispatch_event` |
 | 12 | `platform/mac/text_system.rs` | 合成斜体：要斜体而字体没有斜体字面时（含 CoreText 回退到的字体），换成一个「倾斜孪生」FontId，光栅化时错切 14°（WebKit 的合成倾斜角），字形边界相应加宽 | 中文斜体像浏览器一样倾斜；原来苹方没有斜体，中文斜体显示为正体 |
 | 13 | `text_system/line.rs` | 文字与背景装饰的场景排序边界包含居中、右对齐后的字形位置及超宽文字 | 图片描述不再穿透浮动工具栏，避免工具栏看起来透明 |
+| 14 | `text_system.rs` | `TextSystem::available_font_names`：只返回平台实际提供的字体，不追加跨平台回退候选 | 外观设置不列出无法加载的字体 |
+| 15 | `platform/windows/directx_renderer.rs` | `CreateTargetForHwnd` 的 `topmost` 参数改为 `false`（参见上游 zed-industries/zed#66368） | 避免 DirectComposition 覆盖窗口内嵌的原生 WebView 子窗口 |
 
 ## taffy 0.9.0
 

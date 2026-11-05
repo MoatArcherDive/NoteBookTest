@@ -200,7 +200,7 @@ impl Drop for WriteLock {
 
 /// Version of the on-disk layout, kept in `format.json`. Bump it when a
 /// change would make older builds misread the library.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct FormatMarker {
@@ -304,10 +304,12 @@ impl Store {
         std::fs::create_dir_all(root.join("docs"))?;
         let mut warnings = vec![];
         let marker = root.join("format.json");
+        let _lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".lock"))
+            .ok().and_then(|f| { f.lock().ok()?; Some(WriteLock(f)) });
         match std::fs::read(&marker).ok().and_then(|b| serde_json::from_slice::<FormatMarker>(&b).ok()) {
             Some(m) if m.format > FORMAT => warnings.push("这个文档库由更新版本的 quiet.md 创建，部分内容可能无法正确显示，请升级后再编辑".into()),
-            Some(_) => {}
-            None => write_atomic(&marker, &serde_json::to_vec_pretty(&FormatMarker { format: FORMAT })?)?,
+            Some(m) if m.format == FORMAT => {}
+            _ => write_atomic(&marker, &serde_json::to_vec_pretty(&FormatMarker { format: FORMAT })?)?,
         }
         let index = load_json(&root.join("index.json"), "文档索引", &mut warnings);
         let trash = load_json(&root.join("trash").join("index.json"), "回收站索引", &mut warnings);
@@ -381,6 +383,11 @@ impl Store {
         let doc = docxml::parse(&xml)?;
         if !shared { self.loaded.borrow_mut().insert(id.to_string(), xml); }
         Ok(doc)
+    }
+
+    /// Check whether a cached editor still represents the document on disk.
+    pub fn matches_document(&self, id: &str, doc: &Document) -> Result<bool> {
+        Ok(std::fs::read_to_string(self.path(id))? == docxml::serialize(doc))
     }
 
     pub fn save(&mut self, id: &str, doc: &Document) -> Result<Meta> {
@@ -765,11 +772,23 @@ mod tests {
     }
 
     #[test]
+    fn older_format_is_upgraded() {
+        let lib = Lib::new("older-format");
+        std::fs::create_dir_all(&lib.0).unwrap();
+        std::fs::write(lib.0.join("format.json"), b"{\"format\":1}").unwrap();
+        assert!(lib.open().warnings.is_empty());
+        let marker: FormatMarker = serde_json::from_slice(&std::fs::read(lib.0.join("format.json")).unwrap()).unwrap();
+        assert_eq!(marker.format, FORMAT);
+    }
+
+    #[test]
     fn newer_format_is_reported() {
         let lib = Lib::new("format");
         drop(lib.open());
         std::fs::write(lib.0.join("format.json"), format!("{{\"format\": {}}}", FORMAT + 1)).unwrap();
         assert_eq!(lib.open().warnings.len(), 1);
+        let marker: FormatMarker = serde_json::from_slice(&std::fs::read(lib.0.join("format.json")).unwrap()).unwrap();
+        assert_eq!(marker.format, FORMAT + 1);
     }
 
     #[test]

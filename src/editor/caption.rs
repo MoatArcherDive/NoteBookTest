@@ -49,7 +49,15 @@ impl Editor {
     /// Creates or refreshes the fields of `captions_in`'s blocks.
     pub(super) fn ensure_captions(&mut self, found: Vec<(BlockId, bool, String)>, window: &mut Window, cx: &mut Context<Self>) {
         for (id, code, text) in found {
+            let zoom = if code { 1. } else { crate::settings::document_zoom() };
             if let Some((f, _)) = self.captions.get(&id) {
+                if f.read(cx).size != 13. * zoom || f.read(cx).line_height != (if code { 30. } else { 20. * zoom }) {
+                    f.update(cx, |f, cx| {
+                        f.size = 13. * zoom;
+                        f.line_height = if code { 30. } else { 20. * zoom };
+                        cx.notify();
+                    });
+                }
                 // A field being typed in is ahead of the document until its
                 // change events are delivered.
                 if f.read(cx).text != text && !f.read(cx).focus_handle(cx).is_focused(window) {
@@ -62,8 +70,8 @@ impl Editor {
                 // The caption: 13pt in the caption grey (its weight 300 needs
                 // a weight on TextField; the field draws regular).
                 f.color = Theme::caption();
-                f.size = 13.;
-                f.line_height = if code { 30. } else { 20. };
+                f.size = 13. * zoom;
+                f.line_height = if code { 30. } else { 20. * zoom };
                 // Image descriptions are centred and wrap (pre-wrap).
                 if !code {
                     f.align = crate::model::Align::Center;

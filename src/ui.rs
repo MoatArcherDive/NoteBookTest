@@ -3,7 +3,7 @@
 use crate::theme::{self, Theme, craft};
 use crate::time::civil;
 use gpui::{prelude::FluentBuilder, *};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
@@ -874,4 +874,59 @@ pub(crate) fn checkbox(on: bool) -> Div {
         .rounded(px(4.))
         .when(on, |d| d.bg(Theme::primary()).child(icon("todo-check", 12., Theme::bg_body())))
         .when(!on, |d| d.border_1().border_color(Theme::todo_box()).bg(Theme::bg_body()))
+}
+
+/// Draggable thumb for a tracked vertical scroll area.
+pub(crate) fn scroll_thumb(scroll: ScrollHandle, drag: Rc<Cell<Option<Pixels>>>) -> impl IntoElement {
+    let paint_scroll = scroll.clone();
+    canvas(
+        move |bounds, window, _| {
+            let max = scroll.max_offset().height;
+            let view = scroll.bounds().size.height;
+            if max <= px(0.) || view <= px(0.) { return None; }
+            let h = (bounds.size.height * (view / (view + max))).max(px(24.)).min(bounds.size.height);
+            let top = bounds.top() + (bounds.size.height - h) * (-scroll.offset().y / max).clamp(0., 1.);
+            let zone = Bounds::new(point(bounds.left(), top), size(bounds.size.width, h));
+            Some((top, h, max, window.insert_hitbox(zone, HitboxBehavior::BlockMouseExceptScroll)))
+        },
+        move |bounds, state, window, _| {
+            let Some((top, h, max, hitbox)) = state else { drag.set(None); return; };
+            let thumb = Bounds::new(point(bounds.right() - px(7.), top), size(px(6.), h));
+            window.paint_quad(fill(thumb, Theme::scrollbar_thumb()).corner_radii(px(3.)));
+            window.on_mouse_event({
+                let (drag, hitbox) = (drag.clone(), hitbox.clone());
+                move |ev: &MouseDownEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left && hitbox.is_hovered(window) {
+                        drag.set(Some(ev.position.y - top));
+                        cx.stop_propagation();
+                    }
+                }
+            });
+            window.on_mouse_event({
+                let (drag, scroll) = (drag.clone(), paint_scroll.clone());
+                move |ev: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble { return; }
+                    if let Some(grab) = drag.get() {
+                        if ev.pressed_button == Some(MouseButton::Left) {
+                            let travel = (bounds.size.height - h).max(px(1.));
+                            let fraction = ((ev.position.y - grab - bounds.top()) / travel).clamp(0., 1.);
+                            scroll.set_offset(point(scroll.offset().x, -max * fraction));
+                        } else {
+                            drag.set(None);
+                        }
+                        cx.stop_propagation();
+                        window.refresh();
+                    }
+                }
+            });
+            window.on_mouse_event({
+                let drag = drag.clone();
+                move |ev: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left && drag.take().is_some() {
+                        cx.stop_propagation();
+                    }
+                }
+            });
+        },
+    ).absolute().right(px(2.)).top_0().bottom_0().w(px(12.))
 }

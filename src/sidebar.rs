@@ -9,6 +9,37 @@ use crate::theme::{self, Theme, craft};
 use crate::ui::{TipExt, TitleBarExt, icon, popover, ui_text};
 use gpui::{prelude::FluentBuilder, *};
 
+#[derive(Clone)]
+pub(crate) enum SidebarIconTarget {
+    Document(String),
+    Feishu(String),
+}
+
+pub(crate) struct SidebarIconPicker {
+    target: SidebarIconTarget,
+    bounds: Bounds<Pixels>,
+    field: Entity<crate::input::TextField>,
+    scroll: ScrollHandle,
+    category: usize,
+    _sub: Subscription,
+}
+
+fn sidebar_icon_position(bounds: Bounds<Pixels>, viewport: Size<Pixels>) -> Point<Pixels> {
+    let margin = 8.;
+    let (vw, vh) = (f32::from(viewport.width), f32::from(viewport.height));
+    let (width, height) = (360_f32.min((vw - 2. * margin).max(0.)), 390_f32.min((vh - 2. * margin).max(0.)));
+    let x = f32::from(bounds.right()) + 4.;
+    let y = f32::from(bounds.top());
+    point(px(x.min((vw - width - margin).max(margin)).max(margin)),
+          px(y.min((vh - height - margin).max(margin)).max(margin)))
+}
+
+pub(crate) fn update_document_icon(doc: &mut crate::model::Document, icon: Option<String>) -> bool {
+    if doc.icon == icon { return false; }
+    doc.icon = icon;
+    true
+}
+
 /// Row "…" menu geometry: 32pt rows, 11pt dividers, 6pt padding inside
 /// a 1pt border.
 const ROW_MENU_W: f32 = 180.;
@@ -30,9 +61,20 @@ const DOC_ROW_H: f32 = ROW_H;
 pub(crate) const ROW_R: f32 = 9.;
 pub(crate) const ROW_GAP: f32 = 1.;
 pub(crate) const ROW_ICON: f32 = 18.;
+pub(crate) const ROW_ICON_SLOT: f32 = 20.;
+pub(crate) const ROW_INSET: f32 = 6.;
+pub(crate) const ROW_INDENT: f32 = 18.;
+pub(crate) const ROW_LABEL_GAP: f32 = 9.;
 pub(crate) const GROUP_GAP: f32 = 16.;
 pub(crate) const SECTION_H: f32 = 34.;
 pub(crate) const SECTION_TOP: f32 = 6.;
+
+pub(crate) fn sidebar_row_icon(emoji: Option<&str>, folder: bool, selected: bool) -> Div {
+    div().size(px(ROW_ICON_SLOT)).flex().items_center().justify_center().map(|d| match emoji {
+        Some(em) => d.text_size(px(13.)).line_height(px(20.)).child(em.to_string()),
+        None => d.child(icon(if folder { "folder" } else { "doc" }, ROW_ICON, if selected { Theme::text() } else { Theme::text_caption() })),
+    })
+}
 
 /// 批量操作 caps at 50 pages.
 const BATCH_LIMIT: usize = 50;
@@ -49,7 +91,7 @@ pub(crate) fn footer_row(id: &'static str, glyph: &'static str, label: &'static 
         .items_center()
         .rounded(px(ROW_R))
         .cursor_pointer()
-        .text_size(px(13.))
+        .text_size(px(crate::settings::sidebar_text_size(13.)))
         .line_height(px(20.))
         .text_color(Theme::sidebar_text())
         .hover(|s| s.bg(Theme::sidebar_hover()))
@@ -147,7 +189,7 @@ impl Workspace {
                 .items_center()
                 .rounded(px(ROW_R))
                 .cursor_pointer()
-                .text_size(px(13.))
+                .text_size(px(crate::settings::sidebar_text_size(13.)))
                 .line_height(px(20.))
                 .when(home_on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
                 .when(!home_on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
@@ -181,6 +223,8 @@ impl Workspace {
                 list = list.child(self.doc_row(e, "doc", depth, tree.has_children(&e.id), cx));
             }
         }
+        list = list.child(div().h(px(GROUP_GAP - SECTION_TOP)));
+        list = list.child(self.feishu_links.clone());
 
         // The footer holds one row: 设置 (存储管理 and 回收站 live in 设置).
         // The 批量操作 toolbar keeps the footer glyphs: bare on the sidebar, a rounded fill on hover.
@@ -239,6 +283,7 @@ impl Workspace {
             .h_full()
             .flex()
             .flex_col()
+            .font_family(crate::settings::sidebar_font())
             .child(header)
             .child(nav)
             .child(div().id("doc-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.list_scroll).child(list))
@@ -361,7 +406,7 @@ impl Workspace {
                             cx.notify();
                         })),
                 )
-                .child(div().flex_1().min_w_0().ml(px(8.)).text_size(px(13.)).line_height(px(20.)).text_color(Theme::text()).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
+                .child(div().flex_1().min_w_0().ml(px(8.)).text_size(px(crate::settings::sidebar_text_size(13.))).line_height(px(20.)).text_color(Theme::text()).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
                 .child(
                     div()
                         .id("batch-exit")
@@ -378,7 +423,7 @@ impl Workspace {
                         .shadow(theme::shadow_button())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme::c(craft::N100)))
-                        .text_size(px(12.))
+                        .text_size(px(crate::settings::sidebar_text_size(12.)))
                         .line_height(px(18.))
                         .child(crate::settings::text("退出"))
                         .tip(crate::settings::text("退出批量操作"), None)
@@ -402,7 +447,7 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(Theme::sidebar_hover()))
                 .tip(if folded { crate::settings::text("点击展开") } else { crate::settings::text("点击折叠") }, None)
-                .child(div().pr(px(4.)).text_size(px(13.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(crate::settings::label(title)))
+                .child(div().pr(px(4.)).text_size(px(crate::settings::sidebar_text_size(13.))).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(crate::settings::label(title)))
                 .child(
                     div()
                         .when(!folded, |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
@@ -573,11 +618,129 @@ impl Workspace {
             }))
     }
 
+
+    pub(crate) fn sidebar_icon_picker(&mut self, target: SidebarIconTarget, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.row_menu = None;
+        let field = cx.new(|cx| {
+            let mut field = crate::input::TextField::new(crate::settings::tr("搜索", "Search"), cx);
+            field.size = 13.;
+            field.line_height = 20.;
+            field
+        });
+        let sub = cx.subscribe_in(&field, window, |w, _, ev: &crate::input::TextFieldEvent, window, cx| {
+            match ev {
+                crate::input::TextFieldEvent::Changed => {
+                    if let Some(picker) = &w.sidebar_icon { picker.scroll.set_offset(Point::default()); }
+                    cx.notify();
+                }
+                crate::input::TextFieldEvent::Cancel => w.close_sidebar_icon_picker(true, window, cx),
+                crate::input::TextFieldEvent::Submit => {
+                    let emoji = w.sidebar_icon.as_ref().and_then(|p| crate::editor::emoji::search(p.field.read(cx).text.trim()).first().copied());
+                    if let Some(emoji) = emoji { w.choose_sidebar_icon(Some(emoji), window, cx); }
+                }
+                _ => {}
+            }
+        });
+        let focus = field.read(cx).focus_handle(cx);
+        self.sidebar_icon = Some(SidebarIconPicker { target, bounds, field, scroll: ScrollHandle::new(), category: 0, _sub: sub });
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn close_sidebar_icon_picker(&mut self, refocus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_icon = None;
+        if refocus && self.view == View::Doc
+            && let Some(editor) = &self.editor { editor.read(cx).focus(window); }
+        cx.notify();
+    }
+
+    fn choose_sidebar_icon(&mut self, emoji: Option<&'static crate::editor::emoji::Emoji>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.sidebar_icon.as_ref().map(|p| p.target.clone()) else { return };
+        let saved = match target {
+            SidebarIconTarget::Document(id) => {
+                self.set_sidebar_document_icon(&id, emoji.map(|e| e.char.to_string()), window, cx);
+                true
+            }
+            SidebarIconTarget::Feishu(id) => self.feishu_links.update(cx, |links, cx| links.set_icon(&id, emoji.map(|e| e.char), cx)),
+        };
+        if saved {
+            if let Some(emoji) = emoji { crate::editor::emoji::add_frequent(emoji.id); }
+            self.close_sidebar_icon_picker(true, window, cx);
+        }
+    }
+
+    pub(crate) fn render_sidebar_icon_picker(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.sidebar_icon.as_ref()?;
+        let viewport = window.viewport_size();
+        let width = 360_f32.min((f32::from(viewport.width) - 16.).max(0.));
+        let height = 390_f32.min((f32::from(viewport.height) - 16.).max(0.));
+        let columns = (((width - 24.) / 40.) as usize).clamp(1, 8);
+        let query = picker.field.read(cx).text.trim().to_string();
+        let emojis = if !query.is_empty() {
+            crate::editor::emoji::search(&query)
+        } else if picker.category == 0 {
+            crate::editor::emoji::frequent()
+        } else {
+            crate::editor::emoji::category(picker.category - 1).iter().collect()
+        };
+        let mut grid = div().flex().flex_col().gap(px(2.));
+        for row in emojis.chunks(columns) {
+            let mut line = div().flex().gap(px(2.));
+            for &emoji in row {
+                line = line.child(div().id(SharedString::from(format!("sidebar-emoji-{}", emoji.id)))
+                    .size(px(38.)).flex().items_center().justify_center().rounded(px(5.))
+                    .cursor_pointer().text_size(px(23.)).hover(|s| s.bg(Theme::sidebar_hover()))
+                    .tip(emoji.name, None).child(emoji.char)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |w, _, window, cx| w.choose_sidebar_icon(Some(emoji), window, cx))));
+            }
+            grid = grid.child(line);
+        }
+        let mut categories = div().flex().gap(px(2.)).flex_wrap();
+        for (index, name) in std::iter::once(crate::settings::tr("最近", "Recent")).chain(crate::editor::emoji::CATEGORIES.iter().map(|name| crate::settings::text(name))).enumerate() {
+            categories = categories.child(div().id(("sidebar-emoji-category", index))
+                .px(px(5.)).py(px(3.)).rounded(px(4.)).cursor_pointer()
+                .text_size(px(11.)).when(picker.category == index && query.is_empty(), |d| d.bg(Theme::sidebar_selected()))
+                .hover(|s| s.bg(Theme::sidebar_hover())).child(name)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |w, _, _, cx| {
+                    if let Some(p) = &mut w.sidebar_icon {
+                        p.category = index;
+                        p.scroll.set_offset(Point::default());
+                        p.field.update(cx, |f, cx| f.set_text("", cx));
+                    }
+                    cx.notify();
+                })));
+        }
+        let panel = popover().id("sidebar-icon-picker").occlude().w(px(width)).h(px(height)).p(px(12.))
+            .flex().flex_col().gap(px(8.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|w, _, window, cx| w.close_sidebar_icon_picker(false, window, cx)))
+            .child(div().flex().items_center().justify_between()
+                .child(crate::settings::tr("选择图标", "Choose icon"))
+                .child(div().id("sidebar-icon-remove").cursor_pointer().text_size(px(12.))
+                    .child(crate::settings::tr("移除", "Remove"))
+                    .on_click(cx.listener(|w, _, window, cx| w.choose_sidebar_icon(None, window, cx)))))
+            .child(div().h(px(32.)).px(px(8.)).border_1().border_color(Theme::line_border()).rounded(px(6.))
+                .flex().items_center().child(picker.field.clone()))
+            .child(categories)
+            .child(div().id("sidebar-emoji-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&picker.scroll).child(grid))
+            .child(div().id("sidebar-icon-cancel").cursor_pointer().text_size(px(12.))
+                .child(crate::settings::tr("取消", "Cancel"))
+                .on_click(cx.listener(|w, _, window, cx| w.close_sidebar_icon_picker(true, window, cx))));
+        Some(deferred(anchored().anchor(Corner::TopLeft).position(sidebar_icon_position(picker.bounds, window.viewport_size()))
+            .snap_to_window_with_margin(px(8.)).child(panel)).with_priority(3).into_any_element())
+    }
     fn doc_row(&self, e: &Entry, key: &str, depth: usize, kids: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.view == View::Doc && self.current.as_deref() == Some(e.id.as_str());
         let renaming = self.rename.as_ref().filter(|r| r.id == e.id).map(|r| r.field.clone());
         let title = match renaming {
-            Some(field) => div()
+            Some(field) => {
+                let size = crate::settings::sidebar_text_size(13.);
+                if field.read(cx).size != size {
+                    field.update(cx, |f, cx| { f.size = size; cx.notify(); });
+                }
+                div()
                 .ml(px(6.))
                 .mr(px(6.))
                 .flex_1()
@@ -590,21 +753,46 @@ impl Workspace {
                 .bg(Theme::bg_body())
                 .border_1()
                 .border_color(Theme::primary_500())
-                .text_size(px(13.))
+                .text_size(px(crate::settings::sidebar_text_size(13.)))
                 .child(field)
-                .into_any_element(),
-            None => div()
-                .pl(px(9.))
-                .flex_1()
-                .min_w_0()
-                .text_size(px(13.))
-                .line_height(px(DOC_ROW_H))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_color(if selected { Theme::text() } else { Theme::sidebar_text() })
-                .child(ui_text(display_title(&e.title)))
-                .into_any_element(),
+                .into_any_element()
+            },
+            None => {
+                let title = display_title(&e.title);
+                let can_set_icon = key != "doc" || self.batch.is_none();
+                let icon_id = e.id.clone();
+                div()
+                    .id(SharedString::from(format!("title-{key}-{}", e.id)))
+                    .relative()
+                    .pl(px(ROW_LABEL_GAP))
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(DOC_ROW_H))
+                    .text_size(px(crate::settings::sidebar_text_size(13.)))
+                    .line_height(px(DOC_ROW_H))
+                    .text_color(if selected { Theme::text() } else { Theme::sidebar_text() })
+                    .tip_label(title.clone(), crate::ui::TipSide::Below)
+                    .child(div().w_full().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                        .when(can_set_icon, |d| d.group_hover("doc-row", |s| s.opacity(0.)))
+                        .child(ui_text(title.clone())))
+                    .when(can_set_icon, |d| d
+                        .child(div().absolute().left(px(ROW_LABEL_GAP)).right(px(22.)).top_0()
+                            .overflow_hidden().whitespace_nowrap().text_ellipsis().opacity(0.)
+                            .group_hover("doc-row", |s| s.opacity(1.)).child(ui_text(title)))
+                        .child(div().id(SharedString::from(format!("doc-icon-{key}-{}", e.id)))
+                            .absolute().right_0().top(px((DOC_ROW_H - 22.) / 2.)).size(px(22.))
+                            .flex().items_center().justify_center().rounded(px(6.)).cursor_pointer()
+                            .opacity(0.).group_hover("doc-row", |s| s.opacity(1.))
+                            .hover(|s| s.bg(Theme::sidebar_selected()))
+                            .tip(crate::settings::tr("设置图标", "Set icon"), None)
+                            .child(crate::editor_ui::icon("smile-plus", 14., Theme::text_caption()))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                let bounds = Bounds::new(ev.position, size(px(20.), px(20.)));
+                                w.sidebar_icon_picker(SidebarIconTarget::Document(icon_id.clone()), bounds, window, cx);
+                            }))))
+                    .into_any_element()
+            },
         };
         let renaming = self.rename.as_ref().is_some_and(|r| r.id == e.id);
         let folder = kids || self.entries.iter().any(|child| child.meta.parent.as_deref() == Some(e.id.as_str()));
@@ -618,7 +806,7 @@ impl Workspace {
             .items_center()
             .when(selected || checked, |d| d.bg(Theme::sidebar_selected()))
             .when(!selected && !checked, |d| d.hover(|s| s.bg(Theme::sidebar_hover())))
-            .pl(px(6. + 18. * depth as f32))
+            .pl(px(ROW_INSET + ROW_INDENT * depth as f32))
             .when(batch.is_some(), |d| {
                 d.child(
                     div()
@@ -637,13 +825,8 @@ impl Workspace {
                 // The icon shares 搜索/主页's column, so there is no arrow column:
                 // on pages with children, hovering the row swaps the icon for
                 // a 10px expand triangle.
-                let glyph = div().size(px(20.)).flex().items_center().justify_center().map(|d| match &e.icon {
-                    _ if folder => d.child(icon("folder", ROW_ICON, if selected { Theme::text() } else { Theme::text_caption() })),
-                    // 文档图标 replaces the page glyph.
-                    Some(em) => d.text_size(px(13.)).line_height(px(20.)).child(em.clone()),
-                    None => d.child(icon("doc", ROW_ICON, if selected { Theme::text() } else { Theme::text_caption() })),
-                });
-                let slot = div().id(SharedString::from(format!("arrow-{key}-{}", e.id))).relative().size(px(20.)).flex_none().rounded(px(5.));
+                let glyph = sidebar_row_icon(e.icon.as_deref(), folder, selected);
+                let slot = div().id(SharedString::from(format!("arrow-{key}-{}", e.id))).relative().size(px(ROW_ICON_SLOT)).flex_none().rounded(px(5.));
                 if kids {
                     let open = self.expanded.contains(&e.id);
                     let toggle = e.id.clone();
@@ -689,7 +872,7 @@ impl Workspace {
             crate::ui::menu_row(id, g.clone())
                 .mx(px(0.))
                 .text_color(color)
-                .child(icon(ic, 16., icon_color).group_hover(g.clone(), |s| s.text_color(gpui::white())))
+                .child(if ic == "smile-plus" { crate::editor_ui::icon(ic, 16., icon_color) } else { icon(ic, 16., icon_color) }.group_hover(g.clone(), |s| s.text_color(gpui::white())))
                 .child(div().flex_1().min_w_0().child(crate::ui::menu_label(label, g, gpui::white())))
         };
         let item = |id, ic, label| item_c(id, ic, label, Theme::text(), Theme::text_code());
@@ -729,6 +912,8 @@ impl Workspace {
         let (dup, mv, pin, star, dl, ren, del) = (m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone());
         let pdf = m.id.clone();
         let new_window = m.id.clone();
+        let icon_id = m.id.clone();
+        let icon_anchor = if m.pos.x < px(0.) { point(-m.pos.x - px(1.), m.pos.y) } else { m.pos };
         let sub_bounds = self.row_sub_bounds.clone();
         // The row menu leaves out the cloud entries 在新标签页打开, 分享,
         // 复制链接, 添加快捷方式到, 转移所有权, 设置密级.
@@ -782,6 +967,14 @@ impl Workspace {
                     .on_hover(set_sub(true)),
             )
             .child(
+                item("rm-icon", "smile-plus", crate::settings::tr("设置图标", "Set icon"))
+                    .on_hover(set_sub(false))
+                    .on_click(cx.listener(move |w, _, window, cx| {
+                        let bounds = Bounds::new(icon_anchor, size(px(20.), px(20.)));
+                        w.sidebar_icon_picker(SidebarIconTarget::Document(icon_id.clone()), bounds, window, cx);
+                    })),
+            )
+            .child(
                 item("rm-rename", "square-pen", crate::settings::text("重命名"))
                     .on_hover(set_sub(false))
                     .on_click(cx.listener(move |w, _, window, cx| w.start_rename(&ren, window, cx))),
@@ -793,7 +986,7 @@ impl Workspace {
                     .on_click(cx.listener(move |w, _, _, cx| w.ask_delete(&del, cx))),
             );
         let vh = f32::from(window.viewport_size().height);
-        let menu_h = row_menu_height(8, 2);
+        let menu_h = row_menu_height(9, 2);
         // From the "…" button: hang 2px below it, or sit 2px above it when
         // there's no room below. From a right-click: at the pointer.
         let (origin, corner) = if m.pos.x < px(0.) {
@@ -846,5 +1039,51 @@ impl Workspace {
             self.row_sub_bounds.set(None);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::{sidebar_icon_position, update_document_icon};
+    use gpui::{Bounds, point, px, size};
+
+    #[test]
+    fn picker_position_stays_near_row_and_inside_viewport() {
+        let viewport = size(px(900.), px(700.));
+        let bounds = Bounds::new(point(px(100.), px(100.)), size(px(20.), px(20.)));
+        let normal = sidebar_icon_position(bounds, viewport);
+        assert!(normal.x >= bounds.right() && normal.x <= bounds.right() + px(8.));
+        assert_eq!(normal.y, bounds.top());
+        let edge = sidebar_icon_position(Bounds::new(point(px(880.), px(680.)), size(px(20.), px(20.))), viewport);
+        assert!(edge.x >= px(8.) && edge.x + px(360.) <= viewport.width - px(8.));
+        assert!(edge.y >= px(8.) && edge.y + px(390.) <= viewport.height - px(8.));
+    }
+
+    #[test]
+    fn icon_update_preserves_document_and_store_conflict_detection() {
+        let root = std::env::temp_dir().join(format!("sidebar-icon-{}", uuid::Uuid::new_v4()));
+        let mut store = crate::store::Store::open_at(root.clone()).unwrap();
+        let original = crate::docxml::parse("<title>Title</title><p>Body <b>bold</b></p><unknown id=\"keep\"><nested/></unknown>").unwrap();
+        let id = store.create_from(&original).unwrap();
+        let mut doc = store.load(&id).unwrap();
+        let baseline = crate::docxml::serialize(&doc);
+        assert!(update_document_icon(&mut doc, Some("🌟".into())));
+        assert!(!update_document_icon(&mut doc, Some("🌟".into())));
+        store.save(&id, &doc).unwrap();
+        let mut restored = store.load(&id).unwrap();
+        assert_eq!(restored.icon.as_deref(), Some("🌟"));
+        assert!(update_document_icon(&mut restored, None));
+        assert_eq!(crate::docxml::serialize(&restored), baseline);
+        store.save(&id, &restored).unwrap();
+
+        let mut stale = store.load_for_edit(&id, false).unwrap();
+        let mut external = crate::store::Store::open_at(root.clone()).unwrap();
+        let mut changed = external.load(&id).unwrap();
+        changed.title = crate::model::RichText::plain("External");
+        external.save(&id, &changed).unwrap();
+        update_document_icon(&mut stale, Some("🎉".into()));
+        assert!(store.save(&id, &stale).is_err());
+        assert_eq!(external.load(&id).unwrap().title.text, "External");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -12,6 +12,7 @@ impl SharedStore {
     pub fn list(&mut self) -> Vec<Entry> { self.0.borrow_mut().list() }
     pub fn load(&self, id: &str) -> Result<Document> { self.0.borrow_mut().load(id) }
     pub fn load_for_edit(&self, id: &str, shared: bool) -> Result<Document> { self.0.borrow().load_for_edit(id, shared) }
+    pub fn matches_document(&self, id: &str, doc: &Document) -> Result<bool> { self.0.borrow().matches_document(id, doc) }
     pub fn save(&mut self, id: &str, doc: &Document) -> Result<Meta> { self.0.borrow_mut().save(id, doc) }
     pub fn create(&mut self) -> Result<(String, Document)> { self.0.borrow_mut().create() }
     pub fn create_from(&mut self, doc: &Document) -> Result<String> { self.0.borrow_mut().create_from(doc) }

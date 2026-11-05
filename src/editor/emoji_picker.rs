@@ -89,13 +89,14 @@ fn sections(query: &str) -> Vec<Section> {
 /// Height of the callout's emoji box: it follows the first child's line so
 /// the glyph sits on that line.
 pub fn callout_emoji_height(first: Option<&BlockKind>) -> f32 {
-    match first {
+    let height = match first {
         Some(BlockKind::Heading { level: 1, .. }) => 36.,
         Some(BlockKind::Heading { level: 2, .. }) => 30.,
         Some(BlockKind::Heading { level: 3, .. }) => 28.,
         Some(BlockKind::Heading { level: 4, .. }) => 24.,
         _ => 26.,
-    }
+    };
+    height * crate::settings::document_zoom()
 }
 
 impl Editor {

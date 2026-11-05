@@ -415,6 +415,8 @@ pub struct Core {
     pub pending_marks: Option<Marks>,
     undo: std::collections::VecDeque<std::sync::Arc<Snapshot>>,
     redo: Vec<std::sync::Arc<Snapshot>>,
+    /// Local sync identities live outside user history, keyed by process-local node IDs.
+    sync_ids: HashMap<BlockId, String>,
     last_edit: Option<(EditKind, Instant, BlockId)>,
     pub dirty: bool,
     /// Bumped by every change to the document, including folding.
@@ -432,8 +434,23 @@ pub struct Core {
 
 impl Core {
     pub fn new(doc: Document) -> Self {
-        let first = units(&doc).get(1).map(|u| u.id).unwrap_or(TITLE);
-        let start = if doc.title.is_empty() { TITLE } else { first };
+        fn first_unit(blocks: &[Block]) -> Option<BlockId> {
+            for b in blocks {
+                if b.kind.has_text() {
+                    return Some(b.id);
+                } else if b.kind.is_container() {
+                    if let Some(id) = first_unit(&b.children) { return Some(id); }
+                } else if let BlockKind::Table(t) = &b.kind {
+                    for cell in t.rows.iter().flatten() {
+                        if let Some(id) = first_unit(&cell.blocks) { return Some(id); }
+                    }
+                } else {
+                    return Some(b.id);
+                }
+            }
+            None
+        }
+        let start = if doc.title.is_empty() { TITLE } else { first_unit(&doc.blocks).unwrap_or(TITLE) };
         Core {
             doc,
             sel: Selection::caret(Pos::new(start, 0)),
@@ -442,6 +459,7 @@ impl Core {
             pending_marks: None,
             undo: Default::default(),
             redo: vec![],
+            sync_ids: HashMap::default(),
             last_edit: None,
             dirty: false,
             generation: 0,
@@ -450,6 +468,55 @@ impl Core {
             path_misses: Cell::new((0, 1)),
             notice: None,
         }
+    }
+
+    /// Assign identities before syncing without adding an undo step.
+    pub fn ensure_sync_ids(&mut self) -> bool {
+        let changed = self.doc.ensure_sync_ids();
+        fn remember(blocks: &[Block], ids: &mut HashMap<BlockId, String>) {
+            for block in blocks {
+                if let Some(id) = &block.sync_id {
+                    ids.insert(block.id, id.clone());
+                }
+                remember(&block.children, ids);
+                if let BlockKind::Table(table) = &block.kind {
+                    for cell in table.rows.iter().flatten() {
+                        if cell.is_covered() { continue; }
+                        if let Some(id) = &cell.sync_id {
+                            ids.insert(cell.id, id.clone());
+                        }
+                        remember(&cell.blocks, ids);
+                    }
+                }
+            }
+        }
+        remember(&self.doc.blocks, &mut self.sync_ids);
+        if changed {
+            self.dirty = true;
+            self.generation += 1;
+        }
+        changed
+    }
+
+    fn restore_sync_ids(&self, doc: &mut Document) {
+        fn walk(blocks: &mut [Block], ids: &HashMap<BlockId, String>) {
+            for block in blocks {
+                if let Some(id) = ids.get(&block.id) {
+                    block.sync_id = Some(id.clone());
+                }
+                walk(&mut block.children, ids);
+                if let BlockKind::Table(table) = &mut block.kind {
+                    for cell in table.rows.iter_mut().flatten() {
+                        if cell.is_covered() { continue; }
+                        if let Some(id) = ids.get(&cell.id) {
+                            cell.sync_id = Some(id.clone());
+                        }
+                        walk(&mut cell.blocks, ids);
+                    }
+                }
+            }
+        }
+        walk(&mut doc.blocks, &self.sync_ids);
     }
 
     // ---- lookup
@@ -651,6 +718,7 @@ impl Core {
         self.generation += 1;
         let mut doc = s.doc.clone();
         keep_outside_history(&self.doc, &mut doc);
+        self.restore_sync_ids(&mut doc);
         self.redo.push(std::sync::Arc::new(Snapshot::new(std::mem::replace(&mut self.doc, doc), self.sel)));
         self.sel = s.sel;
         self.block_sel = None;
@@ -666,6 +734,7 @@ impl Core {
         self.generation += 1;
         let mut doc = s.doc.clone();
         keep_outside_history(&self.doc, &mut doc);
+        self.restore_sync_ids(&mut doc);
         let back = Snapshot::new(std::mem::replace(&mut self.doc, doc), self.sel);
         self.push_undo(back);
         self.sel = s.sel;
@@ -3266,6 +3335,93 @@ fn roman(mut n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn initial_caret_matches_first_visible_unit() {
+        for xml in [
+            "<title></title><p>body</p>",
+            "<title>T</title><p>first</p><p>second</p>",
+            "<title>T</title><h1 folded=\"true\">first</h1><p>hidden</p>",
+            "<title>T</title><blockquote><p>nested</p></blockquote><p>later</p>",
+            "<title>T</title><table><tbody><tr><td><p>cell</p></td></tr></tbody></table>",
+            "<title>T</title><hr/><p>later</p>",
+        ] {
+            let doc = crate::docxml::parse(xml).unwrap();
+            let expected = if doc.title.is_empty() { TITLE } else { units(&doc).get(1).map(|u| u.id).unwrap_or(TITLE) };
+            assert_eq!(Core::new(doc).sel.head, Pos::new(expected, 0), "{xml}");
+        }
+        let doc = Document {
+            title: RichText::plain("T"),
+            blocks: vec![
+                Block::new(BlockKind::Quote, RichText::default()),
+                Block::new(BlockKind::Grid, RichText::default()),
+            ],
+            ..Document::default()
+        };
+        assert_eq!(Core::new(doc).sel.head, Pos::new(TITLE, 0));
+    }
+
+    #[test]
+    fn sync_identities_survive_undo_redo_of_deleted_table_nodes() {
+        let mut core = doc("<title>T</title><p>outside</p><table><tbody><tr><td><p>inside</p></td></tr></tbody></table>");
+        core.checkpoint(EditKind::Other);
+        core.doc.blocks[0].text = RichText::plain("edited");
+        assert!(core.ensure_sync_ids());
+        let outside = core.doc.blocks[0].sync_id.clone();
+        let table_id = core.doc.blocks[1].sync_id.clone();
+        let BlockKind::Table(table) = &core.doc.blocks[1].kind else { panic!("table expected") };
+        let cell_id = table.rows[0][0].sync_id.clone();
+        let inner_id = table.rows[0][0].blocks[0].sync_id.clone();
+        core.checkpoint(EditKind::Other);
+        core.doc.blocks.clear();
+        core.doc.blocks.push(Block::text("replacement"));
+        assert!(core.undo());
+        assert_eq!(core.doc.blocks[0].sync_id, outside);
+        assert_eq!(core.doc.blocks[1].sync_id, table_id);
+        let BlockKind::Table(table) = &core.doc.blocks[1].kind else { panic!("table expected") };
+        assert_eq!(table.rows[0][0].sync_id, cell_id);
+        assert_eq!(table.rows[0][0].blocks[0].sync_id, inner_id);
+        assert!(core.undo());
+        let BlockKind::Table(table) = &core.doc.blocks[1].kind else { panic!("table expected") };
+        assert_eq!(table.rows[0][0].sync_id, cell_id);
+        assert_eq!(table.rows[0][0].blocks[0].sync_id, inner_id);
+        assert_eq!(core.doc.blocks[0].sync_id, outside);
+        assert!(!core.ensure_sync_ids());
+        assert!(core.redo());
+        assert!(core.redo());
+        assert!(core.undo());
+        let BlockKind::Table(table) = &core.doc.blocks[1].kind else { panic!("table expected") };
+        assert_eq!(table.rows[0][0].sync_id, cell_id);
+        assert_eq!(table.rows[0][0].blocks[0].sync_id, inner_id);
+        assert!(!core.ensure_sync_ids());
+    }
+    #[test]
+    fn sync_identity_survives_cell_row_deletion_and_undo() {
+        let mut core = doc("<title>T</title><table><tbody><tr><td><p>a</p></td></tr><tr><td><p>b</p></td></tr></tbody></table>");
+        core.checkpoint(EditKind::Other);
+        let BlockKind::Table(table) = &mut core.doc.blocks[0].kind else { panic!("table expected") };
+        table.rows[1][0].blocks[0].text = RichText::plain("edited");
+        assert!(core.ensure_sync_ids());
+        let BlockKind::Table(table) = &core.doc.blocks[0].kind else { panic!("table expected") };
+        let cell_id = table.rows[1][0].sync_id.clone();
+        let block_id = table.rows[1][0].blocks[0].sync_id.clone();
+        core.checkpoint(EditKind::Other);
+        let BlockKind::Table(table) = &mut core.doc.blocks[0].kind else { panic!("table expected") };
+        table.delete_rows(1..2);
+        assert!(core.undo());
+        assert!(core.undo());
+        let BlockKind::Table(table) = &core.doc.blocks[0].kind else { panic!("table expected") };
+        assert_eq!(table.rows[1][0].sync_id, cell_id);
+        assert_eq!(table.rows[1][0].blocks[0].sync_id, block_id);
+        assert!(core.redo());
+        assert!(core.redo());
+        assert!(core.undo());
+        let BlockKind::Table(table) = &core.doc.blocks[0].kind else { panic!("table expected") };
+        assert_eq!(table.rows[1][0].sync_id, cell_id);
+        assert_eq!(table.rows[1][0].blocks[0].sync_id, block_id);
+        assert!(!core.ensure_sync_ids());
+    }
+
+
 
     fn doc(xml: &str) -> Core {
         Core::new(crate::docxml::parse(xml).unwrap())

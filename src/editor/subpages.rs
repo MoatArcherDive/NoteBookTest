@@ -26,6 +26,7 @@ fn page_icon(emoji: &Option<String>) -> AnyElement {
 impl R<'_> {
     pub(super) fn sub_page_list(&self, b: &Block, cx: &mut Context<Editor>) -> AnyElement {
         let ed = self.ed;
+        let zoom = crate::settings::document_zoom();
         let id = b.id;
         // Handle menu open: the accent-tinted ring of the code block;
         // block-selected: an accent rim; otherwise the card hairline.
@@ -33,7 +34,7 @@ impl R<'_> {
         let selected = !menu_on && self.selected.contains(&id);
         let header = div().min_h(px(24.)).mb(px(8.)).flex().items_center().child(
             div()
-                .h(px(20.))
+                .min_h(px(20. * zoom.max(1.)))
                 .min_w_0()
                 .pr(px(4.))
                 .flex()
@@ -45,8 +46,8 @@ impl R<'_> {
                     div()
                         .min_w_0()
                         .max_w(px(476.))
-                        .text_size(px(12.))
-                        .line_height(px(20.))
+                        .text_size(px(12. * zoom))
+                        .line_height(px(20. * zoom))
                         .text_color(Theme::text_caption())
                         .overflow_hidden()
                         .whitespace_nowrap()
@@ -87,9 +88,9 @@ impl R<'_> {
                     .rounded(px(ROW))
                     .cursor_pointer()
                     .hover(|s| s.bg(Theme::fill_hover()))
-                    .child(div().w(px(20.)).h(px(22.)).mr(px(6.)).p(px(2.)).flex_none().flex().items_center().justify_center().child(page_icon(&p.icon)))
+                    .child(div().w(px(20.)).h(px((22. * zoom).max(20.))).mr(px(6.)).p(px(2.)).flex_none().flex().items_center().justify_center().child(page_icon(&p.icon)))
                     // A page block's title: body size.
-                    .child(div().flex_1().min_w_0().text_size(px(15.)).line_height(px(22.)).text_color(Theme::text()).line_clamp(2).child(display_title(&p.title)))
+                    .child(div().flex_1().min_w_0().text_size(px(15. * zoom)).line_height(px(22. * zoom)).text_color(Theme::text()).line_clamp(2).child(display_title(&p.title)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |_, _, _, cx| {

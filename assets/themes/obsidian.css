@@ -6,6 +6,7 @@
  * 列表符号为 --text-faint 浅灰，标题按 1.802 / 1.602 / 1.424 / 1.266 / 1.125 倍放大，
  * 段落间距 1rem，正文栏 700 宽，2px 实线分隔线，代码无行号。
  *
+ * 默认页面底色取自 Typora 参考截图。
  * 每个属性都写着当前的值。改完保存，应用里立即生效；说明见 docs/THEMES.md。
  */
 
@@ -140,7 +141,7 @@
 }
 
 .page {
-  background-color: #ffffff;
+  background-color: #a8ccb6;
   color: var(--text-normal);
   font-family: system-ui;
   font-size: 16px;

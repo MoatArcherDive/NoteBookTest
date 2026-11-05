@@ -98,7 +98,7 @@ for i, (k, parent, pinned) in enumerate(order):
         meta["parent"] = ids[parent]
     index[ids[k]] = meta
 (out / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-(out / "format.json").write_text('{\n  "format": 1\n}')
+(out / "format.json").write_text('{\n  "format": 3\n}')
 shutil.copytree(here / "assets", out / "assets" / "guides")
 (out / "assets" / "guides" / "covers").mkdir()
 for name in sorted(covers):

@@ -100,6 +100,11 @@ impl TextSystem {
         names
     }
 
+    /// quiet.md: actual platform font families, without synthetic fallback names.
+    pub fn available_font_names(&self) -> Vec<String> {
+        self.platform_text_system.all_font_names()
+    }
+
     /// Add a font's data to the text system.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.platform_text_system.add_fonts(fonts)

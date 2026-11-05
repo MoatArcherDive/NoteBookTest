@@ -78,6 +78,10 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 - `sync_items` 给每一行算一个 key，即 `hash_block`。它和上一帧的 key 比较，只 `splice` 前后缀之外变化的区间，所以只有变化的行重新测量高度。
 - `hash_block` 对文本只取长度。原因：列表每帧都会重新测量可见行，同长度的修改（比如对整段 ⌘B）最多让屏幕外某一行的缓存高度暂时过期。对文本本身做哈希，在百万字文档上每次按键要多花约 3ms。实测记录在 `render.rs` 的注释里。
 - 滚动条用 vendor GPUI 新增的 `ListState::estimated_scroll_metrics`：没量过的行按平均行高估算（见 vendor/PATCHES.md）。
+- DocxXML 解析借用包装层和普通段落的节点；打开文档时只查找初始光标所在的首个可见单元，文档引用去重限定在当前块，避免大文档的重复复制和跨块扫描。
+- 在线 WebView 只在可见状态改变时调用原生显示接口；Windows 仅在网页区域、窗口视口或缩放比例改变时更新边界。macOS 仍逐帧更新边界，以跟随原生父视图坐标。
+- 本地文档和在线页面共用窗口标签：本地标签缓存编辑核心及滚动位置，重新激活前检查磁盘内容；在线标签保留各自的 WebView，切换只改变可见性。切换或关闭活动标签前先保存当前本地文档。
+- 在线页面使用网站自身的样式，不注入本地字体、颜色或背景设置，也不参与本地文档持久化。
 
 ## 模块地图
 
@@ -104,6 +108,8 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 | `main.rs` | 入口；`FDL_SCRIPT` 脚本模式；重新导出 `fdl_core` 的模块 |
 | `guides.rs` | 文档库是空的时放入内置的「开始指南」（只放一次） |
 | `app.rs` | `Workspace`：两栏窗口、打开 / 新建 / 保存 / 删除、保存状态、提醒调度 |
+| `tab_bar.rs` | 本地和在线文档共用的标签栏 |
+| `online_webview.rs` | 使用系统 WebView 在窗口内打开在线文档；独立于本地编辑器和文档同步 |
 | `html.rs` / `printing.rs` / `transfer.rs` | 导出 HTML / PDF、打印、导入导出的界面 |
 | `clipboard.rs` | 系统剪贴板的 HTML 读取，以及脚本模式的模拟剪贴板 |
 | `sidebar.rs` / `tree.rs` | 左栏与文档树（子文档、移动到） |

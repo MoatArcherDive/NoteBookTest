@@ -170,8 +170,10 @@ impl Theme {
     pub fn primary() -> Hsla { c(craft::B500) }
     pub fn primary_500() -> Hsla { c(craft::B500) }
     pub fn primary_fill_1() -> Hsla { c(craft::B50) }
-    /// The note: white page.
+    /// White surface for dialogs and other non-document views.
     pub fn bg_body() -> Hsla { c(craft::N00) }
+    /// Opaque page colour sampled from the supplied Typora screenshot.
+    pub fn page_background() -> Hsla { c(0xa8ccb6) }
     /// Light fills inside the note (code blocks, quiet cards).
     pub fn bg_overlay() -> Hsla { c(craft::N100) }
     pub fn line_divider() -> Hsla { ca(craft::N1000, 0.06) }
@@ -217,9 +219,8 @@ impl Theme {
     pub fn danger() -> Hsla { c(craft::R500) }
 
     // ---- quiet.md shell
-    /// A light gray tint separates the sidebar from the white page while keeping wallpaper colors quiet.
-    /// The document pane paints its own opaque white surface.
-    pub fn window() -> Hsla { if crate::native_header::supported() { ca(craft::WINDOW, 0.) } else { ca(craft::WINDOW, 0.84) } }
+    /// Opaque sidebar colour sampled from the supplied Typora screenshot.
+    pub fn window() -> Hsla { c(0xfafafa) }
     /// Sidebar row label: text at 85%.
     pub fn sidebar_text() -> Hsla { ca(craft::N900, 0.85) }
     pub fn sidebar_hover() -> Hsla { ca(craft::N1000, 0.045) }

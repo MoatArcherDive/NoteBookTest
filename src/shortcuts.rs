@@ -15,7 +15,9 @@ pub fn init(cx: &mut App) {
     let base = cx.key_bindings().borrow().bindings().cloned().collect::<Vec<_>>();
     #[cfg(target_os = "windows")]
     let base = base.into_iter().filter_map(windows_binding).collect();
-    let custom = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut custom: BTreeMap<String, String> = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    custom.remove("workspace::IncreaseSidebarText");
+    custom.remove("workspace::DecreaseSidebarText");
     cx.set_global(Shortcuts { base, custom });
     rebuild(cx);
 }
@@ -93,6 +95,8 @@ fn info(name: &str) -> Option<(usize, &'static str, &'static str)> {
         "OpenSettings" => (0, "打开设置", "Open Settings"),
         "GoHome" => (0, "返回主页", "Go to Home"),
         "ToggleSidebar" => (0, "展开 / 收起侧栏", "Show / hide sidebar"),
+        "IncreaseDocumentZoom" => (1, "放大正文", "Increase document text size"),
+        "DecreaseDocumentZoom" => (1, "缩小正文", "Decrease document text size"),
         "FocusSearch" => (0, "搜索文档", "Search documents"),
         "ToggleShortcuts" => (0, "查看快捷键", "Show shortcuts"),
         "ImportDoc" => (1, "导入文档", "Import documents"),

@@ -513,8 +513,8 @@ impl R<'_> {
                     .into_any_element(),
                 None => wrap
                     .justify_center()
-                    .text_size(px(13.))
-                    .line_height(px(20.))
+                    .text_size(px(13. * crate::settings::document_zoom()))
+                    .line_height(px(20. * crate::settings::document_zoom()))
                     .font_weight(FontWeight::LIGHT)
                     .text_color(Theme::caption())
                     .child(caption.clone().unwrap_or_default())
@@ -1769,7 +1769,7 @@ fn download(url: &str, dest: &Path) -> bool {
     }
     let tmp = dest.with_extension("part");
     let fetched = std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "60", "-o"])
+        .args(["-q", "--noproxy", "*", "-fsSL", "--max-time", "60", "-o"])
         .arg(&tmp)
         .arg(url)
         .stdin(std::process::Stdio::null())
@@ -1784,6 +1784,18 @@ fn download(url: &str, dest: &Path) -> bool {
         let _ = std::fs::remove_file(&tmp);
     }
     ok
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn download_for_print(url: &str) -> Option<Vec<u8>> {
+    let output = std::process::Command::new("curl")
+        .args(["-q", "--noproxy", "*", "-fsSL", "--max-time", "60"])
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 /// Crops and turns the image `rot` quarter turns counter-clockwise (BGRA).

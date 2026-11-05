@@ -214,6 +214,7 @@ fn track(map: &Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>, key: &'static
 impl R<'_> {
     pub(super) fn countdown(&self, b: &Block, c: &Countdown, cx: &mut Context<Editor>) -> AnyElement {
         let ed = self.ed;
+        let zoom = crate::settings::document_zoom();
         let id = b.id;
         let now = crate::time::now_ms();
         if !self.ghost {
@@ -226,25 +227,25 @@ impl R<'_> {
         let menu_on = matches!(&ed.menu, Some(Menu::Block { block, .. }) | Some(Menu::Add { block, .. }) if *block == id);
         let selected = !menu_on && self.selected.contains(&id);
 
-        let mut content = div().relative().w(px(256.)).h(px(74.)).whitespace_nowrap();
+        let mut content = div().relative().w(px(256. * zoom)).h(px(74. * zoom)).whitespace_nowrap();
         for (i, v) in parts.iter().enumerate() {
             content = content.child(
-                div().absolute().top_0().right(px(ITEM_RIGHT[i])).flex().flex_col().items_center().child(
+                div().absolute().top_0().right(px(ITEM_RIGHT[i] * zoom)).flex().flex_col().items_center().child(
                     div()
-                        .min_w(px(52.))
-                        .h(px(52.))
-                        .px(px(6.))
+                        .min_w(px(52. * zoom))
+                        .h(px(52. * zoom))
+                        .px(px(6. * zoom))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded(px(RADIUS))
                         .bg(color)
-                        .text_size(px(26.))
+                        .text_size(px(26. * zoom))
                         .font_weight(FontWeight::BOLD)
                         .text_color(gpui::white())
                         .child(format!("{v:02}")),
                 )
-                .child(div().mt(px(4.)).text_size(px(13.)).line_height(px(20.)).text_color(color).child(crate::settings::text(UNITS[i]))),
+                .child(div().mt(px(4. * zoom)).text_size(px(13. * zoom)).line_height(px(20. * zoom)).text_color(color).child(crate::settings::text(UNITS[i]))),
             );
         }
         for r in SEP_RIGHT {
@@ -252,13 +253,13 @@ impl R<'_> {
                 div()
                     .absolute()
                     .top_0()
-                    .right(px(r))
-                    .w(px(16.))
-                    .h(px(54.))
+                    .right(px(r * zoom))
+                    .w(px(16. * zoom))
+                    .h(px(54. * zoom))
                     .flex()
                     .justify_center()
-                    .text_size(px(28.))
-                    .line_height(px(46.))
+                    .text_size(px(28. * zoom))
+                    .line_height(px(46. * zoom))
                     .font_weight(FontWeight::BOLD)
                     .text_color(color)
                     .child(":"),
@@ -266,14 +267,14 @@ impl R<'_> {
         }
         // `.wave-wrapper`: a white 15% wash over the boxes, its top falling
         // from above the boxes (all the time left) to their foot (none).
-        let top = 49. - 60. * progress;
+        let top = (49. - 60. * progress) * zoom;
         content = content.child(
             div()
                 .absolute()
                 .top_0()
                 .left_0()
                 .right_0()
-                .h(px(52.))
+                .h(px(52. * zoom))
                 .overflow_hidden()
                 .child(div().absolute().left_0().right_0().top(px(top)).bottom_0().bg(theme::rgbaf(255, 255, 255, 0.15))),
         );

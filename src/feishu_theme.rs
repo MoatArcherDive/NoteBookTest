@@ -243,7 +243,7 @@ impl Theme { pub fn link_hover() -> Hsla { c(ud::old::B600) } }
 
 impl Theme { pub fn table_line() -> Hsla { ca(craft::N1000, 0.09) } }
 
-impl Theme { pub fn window() -> Hsla { if crate::native_header::supported() { ca(craft::WINDOW, 0.) } else { ca(craft::WINDOW, 0.84) } } }
+impl Theme { pub fn window() -> Hsla { crate::theme::Theme::window() } }
 
 impl Theme { pub fn sidebar_text() -> Hsla { ca(craft::N900, 0.85) } }
 

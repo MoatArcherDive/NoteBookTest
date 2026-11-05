@@ -63,7 +63,7 @@ pub fn open_document(document: Option<String>, cx: &mut App) {
     persist(cx);
     let result = cx.open_window(WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_background: WindowBackgroundAppearance::Blurred,
+        window_background: WindowBackgroundAppearance::Opaque,
         titlebar: Some(TitlebarOptions {
             title: Some(crate::settings::text("quiet.md · 快速笔记").into()),
             appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),

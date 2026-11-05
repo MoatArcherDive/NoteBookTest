@@ -17,6 +17,7 @@ default-members = [".", "crates/core"]
 [dependencies]
 fdl_core = { path = "crates/core" }
 anyhow = "1.0.104"
+async-channel = "2.5.0"
 dirs = "7.0.0"
 gpui = "0.2.2"
 quick-xml = "0.37"
@@ -32,6 +33,9 @@ regex = "1"
 html5ever = "0.27"
 markup5ever_rcdom = "0.3"
 base64 = "0.22"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+wry = { version = "=0.57.1", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"

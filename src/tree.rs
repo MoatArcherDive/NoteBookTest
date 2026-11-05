@@ -93,10 +93,15 @@ impl<'a> Tree<'a> {
     }
 }
 
-/// The 移动到 dialog.
+/// The destination dialog, shared by moves and Feishu downloads.
+#[derive(Clone)]
+enum DestinationAction {
+    Move(Vec<String>),
+    DownloadFeishu { url: String, name: String, force_download: bool },
+}
+
 pub struct MoveDialog {
-    /// Pages being moved (each with its subtree).
-    pub ids: Vec<String>,
+    action: DestinationAction,
     /// Chosen destination: `Some(None)` is the top level of 我的文档.
     pub target: Option<Option<String>>,
     pub expanded: HashSet<String>,
@@ -159,6 +164,14 @@ impl Workspace {
     }
 
     pub(crate) fn open_move(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_destination(DestinationAction::Move(ids), window, cx);
+    }
+
+    pub(crate) fn choose_feishu_destination(&mut self, url: String, name: String, force_download: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_destination(DestinationAction::DownloadFeishu { url, name, force_download }, window, cx);
+    }
+
+    fn open_destination(&mut self, action: DestinationAction, window: &mut Window, cx: &mut Context<Self>) {
         self.row_menu = None;
         let search = cx.new(|cx| {
             let mut f = TextField::new("搜索目标位置", cx);
@@ -172,7 +185,7 @@ impl Workspace {
             cx.notify();
         })];
         window.focus(&search.focus_handle(cx));
-        self.move_dlg = Some(MoveDialog { ids, target: None, expanded: HashSet::new(), search, scroll: ScrollHandle::new(), _subs: subs });
+        self.move_dlg = Some(MoveDialog { action, target: None, expanded: HashSet::new(), search, scroll: ScrollHandle::new(), _subs: subs });
         cx.notify();
     }
 
@@ -215,7 +228,10 @@ impl Workspace {
     pub(crate) fn render_move_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dlg = self.move_dlg.as_ref()?;
         let tree = Tree::new(&self.entries);
-        let hidden: HashSet<String> = dlg.ids.iter().flat_map(|id| tree.subtree(id)).collect();
+        let hidden: HashSet<String> = match &dlg.action {
+            DestinationAction::Move(ids) => ids.iter().flat_map(|id| tree.subtree(id)).collect(),
+            DestinationAction::DownloadFeishu { .. } => HashSet::new(),
+        };
         let q = dlg.search.read(cx).text.trim().to_lowercase();
         let border = Theme::line_border();
 
@@ -356,7 +372,11 @@ impl Workspace {
 
         let ready = dlg.target.is_some();
         // 确定 waits for a target: the accent, faded, until one is picked.
-        let ok = primary_button("move-ok", crate::settings::text("确定"));
+        let ok = primary_button("move-ok", match &dlg.action {
+            DestinationAction::Move(_) => crate::settings::text("确定"),
+            DestinationAction::DownloadFeishu { force_download: false, .. } => crate::settings::tr("下载", "Download"),
+            DestinationAction::DownloadFeishu { force_download: true, .. } => crate::settings::tr("重新下载", "Download again"),
+        });
         let ok = if ready {
             ok
         } else {
@@ -369,7 +389,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().pt(px(24.)).pr(px(56.)).pl(px(24.)).text_size(px(15.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child(crate::settings::text("从 我的文档 移动到")))
+            .child(div().pt(px(24.)).pr(px(56.)).pl(px(24.)).text_size(px(15.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child(match &dlg.action {
+                DestinationAction::Move(_) => crate::settings::text("从 我的文档 移动到"),
+                DestinationAction::DownloadFeishu { force_download: false, .. } => crate::settings::tr("选择下载位置", "Choose download location"),
+                DestinationAction::DownloadFeishu { force_download: true, .. } => crate::settings::tr("选择重新下载位置", "Choose a location to download again"),
+            }))
             .child(close_button("move-close").absolute().top(px(27.)).right(px(25.)).on_click(cx.listener(|w, _, window, cx| w.close_move(window, cx))))
             .child(
                 div().px(px(24.)).mt(px(16.)).mb(px(24.)).child(
@@ -395,10 +419,18 @@ impl Workspace {
                     .child(ok.on_click(cx.listener(|w, _, window, cx| {
                         let Some(d) = w.move_dlg.as_ref() else { return };
                         let Some(target) = d.target.clone() else { return };
-                        let ids = d.ids.clone();
-                        w.batch = None;
-                        w.move_docs(&ids, target, cx);
-                        w.close_move(window, cx);
+                        let action = d.action.clone();
+                        match action {
+                            DestinationAction::Move(ids) => {
+                                w.batch = None;
+                                w.move_docs(&ids, target, cx);
+                                w.close_move(window, cx);
+                            }
+                            DestinationAction::DownloadFeishu { url, name, .. } => {
+                                w.close_move(window, cx);
+                                w.fetch_feishu(url, name, target, window, cx);
+                            }
+                        }
                     }))),
             );
         Some(

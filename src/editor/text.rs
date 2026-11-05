@@ -190,7 +190,7 @@ impl TextSpec {
             size: theme::body_size(),
             line_height: theme::body_line(),
             weight: FontWeight::NORMAL,
-            color: Theme::text(),
+            color: theme::style().color("page.color").unwrap_or_else(Theme::text),
             mono: false,
             strike_all: false,
             wrap: true,
@@ -403,7 +403,9 @@ fn file_geom(ix: usize, f: &crate::model::FileBlock, spec: &TextSpec, row_w: f32
 /// `.docx-button-component__wrapper { margin: 2px 4px }` around
 /// `.docx-button-component { padding: 0 8px }`.
 fn button_geom(ix: usize, b: &crate::model::InlineButton, editing: bool, spec: &TextSpec, row_w: f32, window: &mut Window) -> EqGeom {
-    let (fs, bh, weight, heading) = crate::editor::button::metrics(spec.size, spec.weight);
+    let zoom = crate::settings::document_zoom();
+    let (fs, bh, weight, heading) = crate::editor::button::metrics(spec.size / zoom + 0.00001, spec.weight);
+    let (fs, bh) = (fs * zoom, bh * zoom);
     let lh = spec.line_height;
     let wrap_lh = if heading { bh } else { lh };
     let font = Font {
@@ -441,9 +443,11 @@ fn button_geom(ix: usize, b: &crate::model::InlineButton, editing: bool, spec: &
     }
 }
 
-fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, window: &mut Window) -> EqGeom {
+fn eq_geom(ix: usize, src: &str, row_w: f32, color: Hsla, eqno: u32, window: &mut Window) -> EqGeom {
     let display = math::is_block(src);
-    let parsed = if src.trim().is_empty() { None } else { Some(math::layout(src, display, math::FONT_PX, color, eqno, window)) };
+    let zoom = crate::settings::document_zoom();
+    let math_size = math::FONT_PX * zoom;
+    let parsed = if src.trim().is_empty() { None } else { Some(math::layout(src, display, math_size, color, eqno, window)) };
     let Some(Some(m)) = parsed else {
         // `.equation-block-placeholder` / `-error-placeholder`: 14px/20px,
         // padding 3px 8px; the error text has margin-left 4 after the icon.
@@ -457,21 +461,21 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
             style: FontStyle::Normal,
         };
         let run = TextRun { len: label.len(), font, color: tc, background_color: None, underline: None, strikethrough: None };
-        let line = window.text_system().shape_line(label.into(), px(14.), &[run], None);
+        let line = window.text_system().shape_line(label.into(), px(14. * zoom), &[run], None);
         let (asc, desc) = (f32::from(line.ascent), f32::from(line.descent));
-        let icon_w = if error { 14. + 4. } else { 0. };
+        let icon_w = if error { 14. * zoom + 4. } else { 0. };
         let view_w = 2. + 8. + icon_w + f32::from(line.width) + 8. + 2.;
-        let top = -13.;
-        let baseline = top + 3. + (20. - asc - desc) / 2. + asc;
+        let top = -(20. * zoom + 6.) / 2.;
+        let baseline = top + 3. + (20. * zoom - asc - desc) / 2. + asc;
         return EqGeom {
             ix,
             display,
             adv: (view_w + 2.).min(row_w),
-            box_h: 26.,
-            view: [1., top, view_w, 26.],
+            box_h: 20. * zoom + 6.,
+            view: [1., top, view_w, 20. * zoom + 6.],
             placeholder: true,
             ext: None,
-            body: EqBody::Text { line, at: [1. + 2. + 8. + icon_w, baseline], icon: error.then_some([1. + 2. + 8., top + 3. + 3.]) },
+            body: EqBody::Text { line, at: [1. + 2. + 8. + icon_w, baseline], icon: error.then_some([1. + 2. + 8., top + 3. + 3. * zoom]) },
         };
     };
     if display {
@@ -481,10 +485,10 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
         let a = m.width + tag_w;
         let squeeze = m.tag.is_some() && r < a + tag_w;
         let d = (r / (a.max(m.width) + 1.)).min(1.);
-        let view_h = 15. + m.ascent + m.depth + 15. + 3.;
+        let view_h = 15. * zoom + m.ascent + m.depth + 15. * zoom + 3.;
         let top = -view_h / 2.;
         if d >= 1. && !squeeze {
-            let base = top + 15. + m.ascent;
+            let base = top + 15. * zoom + m.ascent;
             return EqGeom {
                 ix,
                 display,
@@ -502,9 +506,9 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
         }
         // `.overflow-numbering`: the tag follows the formula and the view
         // shrinks to fit, scaled about its left centre.
-        let sm = if d < 1. { math::layout(src, true, math::FONT_PX * d, color, eqno, window).unwrap_or(m.clone()) } else { m.clone() };
+        let sm = if d < 1. { math::layout(src, true, math_size * d, color, eqno, window).unwrap_or(m.clone()) } else { m.clone() };
         let view_w = a + 4.;
-        let base = (top + 15. + m.ascent) * d;
+        let base = (top + 15. * zoom + m.ascent) * d;
         return EqGeom {
             ix,
             display,
@@ -519,15 +523,14 @@ fn eq_geom(ix: usize, src: &str, fs: f32, row_w: f32, color: Hsla, eqno: u32, wi
     // Inline: `.editor-kit-equation-view { padding: 0 2px; min-width: 16px }`;
     // the katex strut is at least 16.48 / 6.59 around the baseline, plus
     // the content's 3px bottom padding.
-    let asc = m.ascent.max(16.48);
-    let desc = m.depth.max(6.59);
+    let asc = m.ascent.max(16.48 * zoom);
+    let desc = m.depth.max(6.59 * zoom);
     let view_w = (m.width + 4.).max(16.);
     let view_h = asc + desc + 3.;
     let top = -view_h / 2.;
     let d = ((row_w - 4.) / (m.width + 1.)).min(1.);
-    let _ = fs;
     let (math, d) = if d < 1. {
-        (math::layout(src, false, math::FONT_PX * d, color, eqno, window).unwrap_or(m), d)
+        (math::layout(src, false, math_size * d, color, eqno, window).unwrap_or(m), d)
     } else {
         (m, 1.)
     };
@@ -806,7 +809,7 @@ impl Element for RichTextElement {
                 .iter()
                 .map(|(ix, src)| match src {
                     ObjSrc::Eq(src) => {
-                        let g = Rc::new(eq_geom(*ix, src, fs, row_w, color, eqno, window));
+                        let g = Rc::new(eq_geom(*ix, src, row_w, color, eqno, window));
                         eqno += math::numbers_in(src);
                         g
                     }
@@ -1031,7 +1034,7 @@ impl Element for RichTextElement {
                     let top = o.y + px(at[1]) - line.ascent;
                     let _ = line.paint(point(o.x + px(at[0]), top), line.ascent + line.descent, window, cx);
                     if let Some(i) = icon {
-                        let b = Bounds::new(point(o.x + px(i[0]), o.y + px(i[1])), size(px(14.), px(14.)));
+                        let b = Bounds::new(point(o.x + px(i[0]), o.y + px(i[1])), size(px(14. * crate::settings::document_zoom()), px(14. * crate::settings::document_zoom())));
                         let _ = window.paint_svg(
                             b,
                             "editor-icons/equation-error.svg".into(),

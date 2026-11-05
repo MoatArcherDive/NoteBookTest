@@ -12,18 +12,18 @@ mod docinfo;
 mod docmenu;
 mod editor;
 mod highlight;
+mod feishu_links;
+mod feishu_fetch;
+mod feishu_sync;
 mod home;
 mod html;
 mod input;
 mod modes;
-#[cfg(target_os = "macos")]
-mod native_header;
-#[cfg(not(target_os = "macos"))]
-#[path = "native_header_fallback.rs"]
-mod native_header;
+mod online_webview;
 mod printing;
 mod search;
 mod sidebar;
+mod tab_bar;
 mod settings;
 mod themes;
 mod shortcuts;
@@ -78,7 +78,7 @@ fn main() {
         editor::image::bind_keys(cx);
         app::bind_keys(cx);
         settings::load();
-        themes::load(&settings::prefs().theme_id(), false, || cx.text_system().all_font_names());
+        themes::load(&settings::prefs().theme_id(), false, || cx.text_system().available_font_names());
         shortcuts::init(cx);
         cx.set_global(shared_store::SharedStore::open().expect("open document library"));
         let quick_enabled = !scripted;
@@ -90,7 +90,7 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background: WindowBackgroundAppearance::Opaque,
                 titlebar: Some(TitlebarOptions {
                     title: Some("quiet.md".into()),
                     appears_transparent: cfg!(any(target_os = "macos", target_os = "windows")),

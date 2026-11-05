@@ -1,6 +1,7 @@
 /*
  * quiet.md 文档主题：Craft
  *
+ * 默认页面底色取自 Typora 参考截图。
  * 每个属性都写着当前的值。改完保存，应用里立即生效。
  * 选择器与属性的说明见 docs/THEMES.md。
  */
@@ -127,7 +128,7 @@
 }
 
 .page {
-  background-color: #ffffff;
+  background-color: #a8ccb6;
   color: #1f2225;
   font-family: system-ui;
   font-size: 15px;

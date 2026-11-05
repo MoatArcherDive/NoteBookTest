@@ -336,7 +336,6 @@ fn image(uri: &str, width: Option<f32>, height: Option<f32>, crop: Option<[f32; 
 /// An image source as a data URI: local files, and remote images already
 /// downloaded for display. Other remote images stay links.
 fn data_uri(src: &str) -> Option<String> {
-    use base64::Engine;
     if src.starts_with("data:") {
         return Some(src.to_string());
     }
@@ -345,12 +344,43 @@ fn data_uri(src: &str) -> Option<String> {
     let Some(bytes) = path.and_then(|p| std::fs::read(p).ok()) else {
         return remote.then(|| src.replace('"', "%22"));
     };
-    let mime = match image::guess_format(&bytes) {
+    Some(image_data_uri(&bytes))
+}
+
+fn image_data_uri(bytes: &[u8]) -> String {
+    use base64::Engine;
+    let mime = match image::guess_format(bytes) {
         Ok(f) => f.to_mime_type(),
         Err(_) if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") => "image/svg+xml",
         Err(_) => "image/png",
     };
-    Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+    format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Resolve remote print resources before WebKit sees the page. A failed image
+/// remains broken, as it would when WebKit could not load it.
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_print_html(html: String) -> String {
+    use std::collections::HashMap;
+
+    let images = regex::Regex::new(r#"(<img src=")(https?://[^"]*)(")|(background-image:url\(')(https?://[^']*)('\))"#).unwrap();
+    let mut fetched = HashMap::new();
+    let html = images.replace_all(&html, |caps: &regex::Captures<'_>| {
+        let (prefix, url, suffix) = if let Some(url) = caps.get(2) {
+            (&caps[1], url.as_str(), &caps[3])
+        } else {
+            (&caps[4], &caps[5], &caps[6])
+        };
+        let uri = fetched.entry(url.to_owned()).or_insert_with(|| {
+            crate::editor::image::download_for_print(url).map(|bytes| image_data_uri(&bytes)).unwrap_or_default()
+        });
+        format!("{prefix}{uri}{suffix}")
+    });
+    html.replacen(
+        "<head>",
+        "<head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'\">",
+        1,
+    )
 }
 
 fn code(lang: &str, text: &str) -> String {

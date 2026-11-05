@@ -319,6 +319,7 @@ fn shell_btn(id: impl Into<ElementId>) -> Stateful<Div> {
 impl R<'_> {
     pub(super) fn file(&self, b: &Block, f: &FileBlock, env: Env, cx: &mut Context<Editor>) -> AnyElement {
         let ed = self.ed;
+        let zoom = crate::settings::document_zoom();
         let id = b.id;
         let container = if env.width > 0. { env.width } else { ed.content_width() };
         let active = !self.ghost && ed.active_file(self.focused) == Some(id);
@@ -380,7 +381,7 @@ impl R<'_> {
                     .mb(px(2.))
                     .flex()
                     .items_center()
-                    .child(div().flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).text_ellipsis().whitespace_nowrap().overflow_hidden().child(f.name.clone()))
+                    .child(div().flex_1().min_w_0().text_size(px(13. * zoom)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).text_ellipsis().whitespace_nowrap().overflow_hidden().child(f.name.clone()))
                     .child(div().ml(px(8.)).flex_none().text_size(px(12.)).text_color(Theme::text_caption()).child(if ok { format!("{} / {}", clock(t), clock(d)) } else { crate::settings::text("无法播放").into() }));
                 let icon_c = if ok { Theme::text_code() } else { Theme::text_disabled() };
                 let play = shell_btn((if playing { "file-pause" } else { "file-play" }, id.0))
@@ -514,7 +515,7 @@ impl R<'_> {
                         .into_any_element(),
                 };
                 let footer = div()
-                    .h(px(42.))
+                    .min_h(px(42. * zoom.max(1.)))
                     .px(px(12.))
                     .flex()
                     .items_center()
@@ -522,7 +523,7 @@ impl R<'_> {
                     .border_t_1()
                     .border_color(Theme::line_divider())
                     .child(type_icon(kind, 20.))
-                    .child(div().ml(px(8.)).min_w_0().text_size(px(13.)).text_color(Theme::text()).text_ellipsis().whitespace_nowrap().overflow_hidden().child(f.name.clone()));
+                    .child(div().ml(px(8.)).min_w_0().text_size(px(13. * zoom)).text_color(Theme::text()).text_ellipsis().whitespace_nowrap().overflow_hidden().child(f.name.clone()));
                 // A crisp card: hairline, radius 5, the button drop.
                 div()
                     .id(("file-preview", id.0))
@@ -580,11 +581,11 @@ impl R<'_> {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .h(px(64.))
+                            .min_h(px(64.))
                             .flex()
                             .flex_col()
                             .justify_center()
-                            .child(div().max_h(px(42.)).text_size(px(15.)).line_height(px(21.)).text_color(Theme::text()).line_clamp(2).overflow_hidden().child(f.name.clone()))
+                            .child(div().max_h(px(42. * zoom)).text_size(px(15. * zoom)).line_height(px(21. * zoom)).text_color(Theme::text()).line_clamp(2).overflow_hidden().child(f.name.clone()))
                             .child(
                                 div()
                                     .h(px(17.))

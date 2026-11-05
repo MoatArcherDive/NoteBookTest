@@ -8,13 +8,16 @@ use crate::ui::{TitleBarExt, TipExt};
 use crate::sidebar as sb;
 use gpui::{prelude::FluentBuilder, *};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 // ---- preferences
 
 static FEISHU: AtomicBool = AtomicBool::new(false);
 static ENGLISH: AtomicBool = AtomicBool::new(true);
+static SIDEBAR_FONT_SIZE: AtomicU32 = AtomicU32::new(13);
+static CATALOGUE_FONT_SIZE: AtomicU32 = AtomicU32::new(13);
+static DOCUMENT_ZOOM: AtomicU32 = AtomicU32::new(100);
 static PREFS: RwLock<Option<Preferences>> = RwLock::new(None);
 
 /// The active document theme draws blocks the 飞书 way (else Craft's).
@@ -35,10 +38,22 @@ pub struct Preferences {
     pub remote_images: bool,
     /// The system-wide quick note hotkey is registered.
     pub quick_hotkey: bool,
+    /// Local document appearance overrides; None follows the selected theme.
+    pub document_font: Option<String>,
+    pub document_color: Option<String>,
+    pub document_background: Option<String>,
+    /// Sidebar typography, independent from document appearance.
+    pub sidebar_font: Option<String>,
+    pub sidebar_font_size: u8,
+    /// Catalogue typography is independent of the sidebar.
+    pub catalogue_font: Option<String>,
+    pub catalogue_font_size: u8,
+    /// Document text zoom, as a percentage.
+    pub document_zoom: u16,
 }
 
 impl Default for Preferences {
-    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: true, remote_images: true, quick_hotkey: true } }
+    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: true, remote_images: true, quick_hotkey: true, document_font: None, document_color: None, document_background: None, sidebar_font: None, sidebar_font_size: 13, catalogue_font: None, catalogue_font_size: 13, document_zoom: 100 } }
 }
 
 impl Preferences {
@@ -49,23 +64,73 @@ impl Preferences {
 
 fn path() -> std::path::PathBuf { crate::store::Store::root_dir().join("preferences.json") }
 
+fn read_preferences(data: &[u8]) -> serde_json::Result<Preferences> {
+    let mut value: serde_json::Value = serde_json::from_slice(data)?;
+    if let Some(object) = value.as_object_mut()
+        && !object.contains_key("catalogue_font_size")
+    {
+        let size = object.get("sidebar_font_size").cloned().unwrap_or(13.into());
+        object.insert("catalogue_font_size".into(), size);
+    }
+    let mut p: Preferences = serde_json::from_value(value)?;
+    p.sidebar_font_size = p.sidebar_font_size.clamp(11, 18);
+    p.catalogue_font_size = p.catalogue_font_size.clamp(11, 18);
+    p.document_zoom = p.document_zoom.clamp(50, 200);
+    Ok(p)
+}
+
 pub fn load() {
-    let p = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice::<Preferences>(&b).ok()).unwrap_or_default();
+    let p = std::fs::read(path()).ok().and_then(|b| read_preferences(&b).ok()).unwrap_or_default();
     apply(p);
 }
 
-fn apply(p: Preferences) {
+fn apply(mut p: Preferences) {
+    p.sidebar_font_size = p.sidebar_font_size.clamp(11, 18);
+    p.catalogue_font_size = p.catalogue_font_size.clamp(11, 18);
+    p.document_zoom = p.document_zoom.clamp(50, 200);
+    SIDEBAR_FONT_SIZE.store(p.sidebar_font_size as u32, Ordering::Relaxed);
+    CATALOGUE_FONT_SIZE.store(p.catalogue_font_size as u32, Ordering::Relaxed);
+    DOCUMENT_ZOOM.store(p.document_zoom as u32, Ordering::Relaxed);
     FEISHU.store(p.feishu, Ordering::Relaxed);
     ENGLISH.store(p.english, Ordering::Relaxed);
-    // Before the themes are read (startup) the base comes from `feishu`.
-    themes::select(&p.theme_id());
+    let id = p.theme_id();
     *PREFS.write().unwrap() = Some(p);
+    // Before the themes are read (startup) the base comes from `feishu`.
+    themes::select(&id);
 }
 
 /// The current preferences (loaded on first use).
 pub fn prefs() -> Preferences {
     if PREFS.read().unwrap().is_none() { load(); }
     PREFS.read().unwrap().clone().unwrap_or_default()
+}
+
+pub(crate) fn sidebar_font() -> &'static str {
+    if PREFS.read().unwrap().is_none() { load(); }
+    let preferences = PREFS.read().unwrap();
+    preferences.as_ref().and_then(|p| p.sidebar_font.as_deref())
+        .and_then(|selected| themes::installed_fonts().iter().find(|name| name.eq_ignore_ascii_case(selected)))
+        .map(String::as_str).unwrap_or(theme::UI_FONT)
+}
+
+pub(crate) fn sidebar_text_size(base: f32) -> f32 {
+    base * SIDEBAR_FONT_SIZE.load(Ordering::Relaxed) as f32 / 13.
+}
+
+pub(crate) fn catalogue_font() -> &'static str {
+    if PREFS.read().unwrap().is_none() { load(); }
+    let preferences = PREFS.read().unwrap();
+    preferences.as_ref().and_then(|p| p.catalogue_font.as_deref())
+        .and_then(|selected| themes::installed_fonts().iter().find(|name| name.eq_ignore_ascii_case(selected)))
+        .map(String::as_str).unwrap_or(theme::UI_FONT)
+}
+
+pub(crate) fn catalogue_text_size(base: f32) -> f32 {
+    base * CATALOGUE_FONT_SIZE.load(Ordering::Relaxed) as f32 / 13.
+}
+
+pub(crate) fn document_zoom() -> f32 {
+    DOCUMENT_ZOOM.load(Ordering::Relaxed) as f32 / 100.
 }
 
 fn save(p: &Preferences) -> anyhow::Result<()> {
@@ -131,6 +196,9 @@ pub(crate) fn watch_themes(cx: &mut Context<Workspace>) {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Page { #[default] General, Appearance, Shortcuts, Library, About }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppearanceTarget { #[default] Document, Sidebar, Catalogue }
 
 impl Page {
     fn title(self) -> &'static str {
@@ -239,8 +307,8 @@ const PAGE_S: f32 = 0.78;
 /// 外观's sample page: a short document with most of what a theme styles
 /// (headings, inline styles, lists, a task, quote, callout, table, divider,
 /// highlighted code), at scale `s`, in two columns so it reads at a glance.
-fn sample_page(t: &themes::Theme, s: f32) -> Div {
-    let st = t.style;
+fn sample_page(s: f32) -> Div {
+    let st = themes::active();
     let sc = |v: f32| px((v * s).max(0.5));
     let text = st.color("page.color").unwrap_or_else(|| st.token("text"));
     let (body, line) = (st.num("page.size"), st.num("page.line"));
@@ -356,6 +424,30 @@ fn popup_button(id: impl Into<ElementId>, label: impl Into<SharedString>, open: 
         .child(div().min_w_0().truncate().child(label.into()))
         .child(ui::icon("chevron-down", 12., Theme::text_caption()))
 }
+fn appearance_colors(id: &'static str, current: Option<&str>, background: bool, cx: &mut Context<Workspace>) -> Div {
+    const COLORS: [&str; 14] = ["#000000", "#333333", "#666666", "#FFFFFF", "#C62828", "#E65100", "#2E7D32", "#1565C0", "#6A1B9A", "#F7F6F2", "#FFF4D6", "#FFE8E8", "#E6F4EA", "#E6F0FF"];
+    div().w(px(300.)).flex().flex_wrap().items_center().gap(px(6.))
+        .children(COLORS.into_iter().enumerate().map(|(i, value)| {
+            let selected = current.is_some_and(|v| v.eq_ignore_ascii_case(value));
+            div().id(SharedString::from(format!("{id}-{i}"))).size(px(24.)).rounded(px(6.)).cursor_pointer()
+                .bg(themes::appearance_color(value).unwrap()).border_1().border_color(if selected { Theme::primary() } else { Theme::button_border() })
+                .tip(value, None)
+                .on_click(cx.listener(move |w, _, _, cx| {
+                    w.set_pref(|p| {
+                        if background { p.document_background = Some(value.into()); } else { p.document_color = Some(value.into()); }
+                    }, cx);
+                    if background { w.sync_background_hex(cx); }
+                }))
+        }))
+        .child(link_button(SharedString::from(format!("{id}-reset")), tr("恢复主题默认", "Use theme default"))
+            .on_click(cx.listener(move |w, _, _, cx| {
+                w.set_pref(|p| {
+                    if background { p.document_background = None; } else { p.document_color = None; }
+                }, cx);
+                if background { w.sync_background_hex(cx); }
+            })))
+}
+
 
 fn apply_theme(w: &mut Workspace, id: String, cx: &mut Context<Workspace>) {
     let feishu = themes::themes().iter().find(|t| t.id == id).is_some_and(|t| t.style.feishu);
@@ -425,14 +517,53 @@ impl Workspace {
         if p.quick_hotkey != old.quick_hotkey {
             if p.quick_hotkey { crate::quick_note::register(cx); } else { crate::quick_note::suspend_hotkey(); }
         }
-        if p.theme_id() != old.theme_id() || p.english != old.english {
+        if p.theme_id() != old.theme_id() || p.english != old.english || p.document_font != old.document_font || p.document_color != old.document_color || p.document_background != old.document_background || p.sidebar_font != old.sidebar_font || p.sidebar_font_size != old.sidebar_font_size || p.catalogue_font != old.catalogue_font || p.catalogue_font_size != old.catalogue_font_size || p.document_zoom != old.document_zoom {
             refresh_all(self, cx);
         }
         cx.notify();
     }
 
+    pub(crate) fn adjust_sidebar_font_size(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let size = prefs().sidebar_font_size;
+        let next = size.saturating_add_signed(delta).clamp(11, 18);
+        if next != size { self.set_pref(|p| p.sidebar_font_size = next, cx); }
+    }
+
+    fn adjust_catalogue_font_size(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let size = prefs().catalogue_font_size;
+        let next = size.saturating_add_signed(delta).clamp(11, 18);
+        if next != size { self.set_pref(|p| p.catalogue_font_size = next, cx); }
+    }
+
+    pub(crate) fn adjust_document_zoom(&mut self, delta: i8, cx: &mut Context<Self>) {
+        let zoom = prefs().document_zoom;
+        let next = (zoom as i16 + delta as i16 * 10).clamp(50, 200) as u16;
+        if next != zoom { self.set_pref(|p| p.document_zoom = next, cx); }
+    }
+
+    fn sync_background_hex(&mut self, cx: &mut Context<Self>) {
+        let value = prefs().document_background.unwrap_or_default();
+        self.background_hex.update(cx, |field, cx| field.set_text(&value, cx));
+        self.background_hex_error = false;
+        cx.notify();
+    }
+
+    pub(crate) fn apply_background_hex(&mut self, cx: &mut Context<Self>) {
+        let value = self.background_hex.read(cx).text.trim();
+        if themes::appearance_color(value).is_none() {
+            self.background_hex_error = true;
+            cx.notify();
+            return;
+        }
+        let value = value.to_ascii_uppercase();
+        self.set_pref(|p| p.document_background = Some(value), cx);
+        if prefs().document_background.as_deref().is_some_and(|saved| saved.eq_ignore_ascii_case(self.background_hex.read(cx).text.trim())) {
+            self.sync_background_hex(cx);
+        }
+    }
+
     pub(crate) fn reload_themes(&mut self, cx: &mut Context<Self>) {
-        themes::load(&prefs().theme_id(), themes::all_loaded(), || cx.text_system().all_font_names());
+        themes::load(&prefs().theme_id(), themes::all_loaded(), || cx.text_system().available_font_names());
         refresh_all(self, cx);
     }
 
@@ -451,7 +582,7 @@ impl Workspace {
     fn duplicate_theme(&mut self, id: &str, cx: &mut Context<Self>) {
         match themes::duplicate(id) {
             Ok((new_id, p)) => {
-                themes::load(&new_id, themes::all_loaded(), || cx.text_system().all_font_names());
+                themes::load(&new_id, themes::all_loaded(), || cx.text_system().available_font_names());
                 let feishu = themes::themes().iter().find(|t| t.id == new_id).is_some_and(|t| t.style.feishu);
                 self.set_pref(move |pr| { pr.theme = new_id; pr.feishu = feishu; }, cx);
                 open_in_editor(&p, cx);
@@ -484,21 +615,21 @@ impl Workspace {
             let on = if page.is_some() { page == current } else { in_trash };
             let (title, icon) = page.map_or((tr("回收站", "Trash"), "bin"), |p| (p.title(), p.icon()));
             div().id(SharedString::from(format!("settings-nav-{page:?}"))).h(px(sb::ROW_H)).flex().items_center().pl(px(6.)).pr(px(4.)).rounded(px(sb::ROW_R))
-                .text_size(px(13.)).line_height(px(20.)).cursor_pointer()
+                .text_size(px(sidebar_text_size(13.))).line_height(px(20.)).cursor_pointer()
                 .when(on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
                 .when(!on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
                 .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(ui::icon(icon, sb::ROW_ICON, if on { Theme::text_code() } else { Theme::icon() })))
                 .child(title)
                 .on_click(cx.listener(move |w, _, _, cx| match page { Some(p) => w.open_settings(p, cx), None => w.show_view(View::Trash, cx) }))
         };
-        div().w(px(self.sidebar_w(window))).h_full().flex_none().flex().flex_col().text_color(Theme::text()).font_family(theme::UI_FONT)
+        div().w(px(self.sidebar_w(window))).h_full().flex_none().flex().flex_col().text_color(Theme::text()).font_family(sidebar_font())
             .child(div().h(px(crate::app::HEADER_H)).flex_none().flex().items_center().pl(px(theme::TRAFFIC_LIGHTS_W)).title_bar().child(self.header_navigation(cx)))
             // The document sidebar's rhythm: 主页 sits 8 under the bar, a section
             // header like 我的文档's, rows on a 31 pitch. 设置's line sits on
             // 主页's, not a section header's: the 34pt box keeps the rows below.
             .child(div().pt(px(8.)).px(px(sb::SB_X)).flex().flex_col()
                 .child(div().h(px(sb::SECTION_H)).pl(px(4.)).pt(px((sb::SECTION_TOP + sb::SECTION_H) / 2. - sb::ROW_H / 2.))
-                    .child(div().px(px(4.)).text_size(px(13.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(tr("设置", "Settings"))))
+                    .child(div().px(px(4.)).text_size(px(sidebar_text_size(13.))).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(tr("设置", "Settings"))))
                 .child(div().flex().flex_col().gap(px(sb::ROW_GAP)).children(NAV.iter().map(|p| nav_row(*p, cx)).collect::<Vec<_>>())))
             // Where 设置 was: 返回, back to the page 设置 was opened from.
             .child(div().flex_1())
@@ -529,7 +660,7 @@ impl Workspace {
 
     /// Back to where 设置 was opened from.
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
-        let back = if self.editor.is_some() && self.current.is_some() { View::Doc } else { View::Home };
+        let back = if self.has_online_document() || (self.editor.is_some() && self.current.is_some()) { View::Doc } else { View::Home };
         self.show_view(back, cx);
     }
 
@@ -569,7 +700,8 @@ impl Workspace {
     }
 
     fn appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = prefs().theme_id();
+        let p = prefs();
+        let current = p.theme_id();
         let list = themes::themes();
         let sel = list.iter().find(|t| t.id == current).or_else(|| list.first());
         let (sel_id, sel_name, sel_path, customized, own, warnings) = match sel {
@@ -590,14 +722,14 @@ impl Workspace {
             .relative()
             .on_click(cx.listener(move |w, _, _, cx| {
                 if w.theme_menu.is_none() && !themes::all_loaded() {
-                    themes::load(&prefs().theme_id(), true, || cx.text_system().all_font_names());
+                    themes::load(&prefs().theme_id(), true, || cx.text_system().available_font_names());
                 }
                 w.theme_menu = if w.theme_menu.is_some() { None } else { Some(open_id.clone()) };
                 cx.notify();
             }));
         // One group, top to bottom: the choice, how it looks, its stylesheet.
         // The preview is a page of the theme on a quiet band, like a sheet on a desk.
-        let shown = { let list = themes::themes(); list.iter().find(|t| t.id == current).or_else(|| list.first()).map(|t| sample_page(t, PAGE_S).rounded(px(7.))) };
+        let shown = Some(sample_page(PAGE_S).rounded(px(7.)));
         let sample = div().w_full().px(px(16.)).py(px(16.)).flex().justify_center().bg(Theme::fill_hover())
             .child(div().w_full().h(px(360.)).rounded(px(8.)).overflow_hidden().border_1().border_color(Theme::line_border()).shadow(theme::shadow_button()).children(shown));
         div().w_full().flex().flex_col().gap(px(28.))
@@ -614,7 +746,149 @@ impl Workspace {
                 ]))
                 .children(errors.into_iter().chain(warnings.into_iter().take(8).map(|w| format!("{}：{w}", tr("未生效", "Ignored")))).map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
                 )
+            .child(group(Some(tr("文档默认外观", "Document defaults")), vec![
+                row(tr("字体与页面背景", "Font and page background"), None,
+                    button("appearance-edit", tr("设置", "Customize"))
+                        .on_click(cx.listener(|w, _, window, cx| w.open_appearance_dialog(window, cx)))).into_any_element(),
+            ]))
+            .child(group(Some(tr("侧栏外观", "Sidebar appearance")), vec![
+                row(tr("字体与字号", "Font and size"), None,
+                    button("sidebar-appearance-edit", tr("设置", "Customize"))
+                        .on_click(cx.listener(|w, _, window, cx| w.open_sidebar_appearance_dialog(window, cx)))).into_any_element(),
+            ]))
+            .child(group(Some(tr("文档目录外观", "Document catalogue appearance")), vec![
+                row(tr("字体与字号", "Font and size"), None,
+                    button("catalogue-appearance-edit", tr("设置", "Customize"))
+                        .on_click(cx.listener(|w, _, window, cx| w.open_appearance_dialog_for(AppearanceTarget::Catalogue, window, cx)))).into_any_element(),
+            ]))
             .into_any_element()
+    }
+
+    fn appearance_defaults(&self, font_list_height: Pixels, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = prefs();
+        let target = self.appearance_target;
+        let selected_font = match target {
+            AppearanceTarget::Document => &p.document_font,
+            AppearanceTarget::Sidebar => &p.sidebar_font,
+            AppearanceTarget::Catalogue => &p.catalogue_font,
+        };
+        let font_description = match selected_font {
+            Some(font) if !themes::installed_fonts().iter().any(|f| f.eq_ignore_ascii_case(font)) => format!("{}: {font}", if target != AppearanceTarget::Document { tr("字体不可用，使用默认字体", "Font unavailable; using default font") } else { tr("字体不可用，使用主题默认", "Font unavailable; using theme default") }),
+            Some(font) => font.clone(),
+            None => if target != AppearanceTarget::Document { tr("使用默认字体", "Using default font") } else { tr("使用主题默认", "Using theme default") }.to_string(),
+        };
+        let fonts = themes::installed_fonts().iter().enumerate().map(|(i, font)| {
+            let chosen = selected_font.as_ref().is_some_and(|f| f.eq_ignore_ascii_case(font));
+            let name = font.clone();
+            div().id(SharedString::from(format!("appearance-font-{i}"))).px(px(12.)).py(px(5.)).rounded(px(6.)).cursor_pointer()
+                .text_size(px(13.)).text_color(Theme::text()).when(chosen, |d| d.bg(Theme::fill_hover_strong()))
+                .hover(|d| d.bg(Theme::fill_hover())).child(font.clone())
+                .on_click(cx.listener(move |w, _, _, cx| { let name = name.clone(); w.set_pref(|p| match target { AppearanceTarget::Document => p.document_font = Some(name), AppearanceTarget::Sidebar => p.sidebar_font = Some(name), AppearanceTarget::Catalogue => p.catalogue_font = Some(name) }, cx); }))
+                .into_any_element()
+        }).collect::<Vec<_>>();
+        let font_row = row(match target { AppearanceTarget::Document => tr("默认字体", "Default font"), AppearanceTarget::Sidebar => tr("侧栏字体", "Sidebar font"), AppearanceTarget::Catalogue => tr("目录字体", "Catalogue font") }, Some(font_description.into()),
+            link_button("appearance-font-reset", if target != AppearanceTarget::Document { tr("恢复默认", "Use default") } else { tr("恢复主题默认", "Use theme default") })
+                .on_click(cx.listener(move |w, _, _, cx| w.set_pref(|p| match target { AppearanceTarget::Document => p.document_font = None, AppearanceTarget::Sidebar => p.sidebar_font = None, AppearanceTarget::Catalogue => p.catalogue_font = None }, cx)))).into_any_element();
+        let font_list = div().relative().w_full().h(font_list_height)
+            .child(div().id("appearance-font-list").size_full().overflow_y_scroll().track_scroll(&self.appearance_font_scroll)
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .pl(px(8.)).pr(px(18.)).py(px(4.)).flex().flex_col().children(fonts))
+            .child(ui::scroll_thumb(self.appearance_font_scroll.clone(), self.appearance_font_drag.clone())).into_any_element();
+        if target != AppearanceTarget::Document {
+            let sidebar = target == AppearanceTarget::Sidebar;
+            let size = if sidebar { p.sidebar_font_size } else { p.catalogue_font_size };
+            let controls = div().flex().items_center().gap(px(8.))
+                .child(link_button(if sidebar { "sidebar-size-reset" } else { "catalogue-size-reset" }, tr("恢复默认", "Reset"))
+                    .on_click(cx.listener(move |w, _, _, cx| w.set_pref(|p| if sidebar { p.sidebar_font_size = 13 } else { p.catalogue_font_size = 13 }, cx))))
+                .child(button(if sidebar { "sidebar-size-minus" } else { "catalogue-size-minus" }, "−").when(size == 11, |d| d.opacity(0.45))
+                    .on_click(cx.listener(move |w, _, _, cx| if sidebar { w.adjust_sidebar_font_size(-1, cx) } else { w.adjust_catalogue_font_size(-1, cx) })))
+                .child(div().min_w(px(36.)).text_center().text_size(px(13.)).child(format!("{size} px")))
+                .child(button(if sidebar { "sidebar-size-plus" } else { "catalogue-size-plus" }, "+").when(size == 18, |d| d.opacity(0.45))
+                    .on_click(cx.listener(move |w, _, _, cx| if sidebar { w.adjust_sidebar_font_size(1, cx) } else { w.adjust_catalogue_font_size(1, cx) })));
+            return vec![font_row, font_list, row(if sidebar { tr("侧栏字号", "Sidebar text size") } else { tr("目录字号", "Catalogue text size") }, None, controls).into_any_element()];
+        }
+        let color_description = |value: &Option<String>| match value {
+            Some(value) if themes::appearance_color(value).is_none() => format!("{}: {value}", tr("颜色无效，使用主题默认", "Invalid color; using theme default")),
+            Some(value) => value.clone(),
+            None => tr("使用主题默认", "Using theme default").into(),
+        };
+        let background = div().flex().flex_col().gap(px(8.))
+            .child(appearance_colors("appearance-background", p.document_background.as_deref(), true, cx))
+            .child(div().flex().items_center().gap(px(8.))
+                .child(div().w(px(120.)).h(px(28.)).px(px(8.)).flex().items_center().rounded(px(7.))
+                    .border_1().border_color(if self.background_hex_error { Theme::danger() } else { Theme::button_border() })
+                    .child(self.background_hex.clone()))
+                .child(button("appearance-background-apply", tr("应用", "Apply"))
+                    .on_click(cx.listener(|w, _, _, cx| w.apply_background_hex(cx)))))
+            .when(self.background_hex_error, |d| d.child(div().text_size(px(12.)).text_color(Theme::danger())
+                .child(tr("请输入 #RRGGBB，例如 #FFFFFF", "Enter #RRGGBB, e.g. #FFFFFF"))));
+        vec![
+            font_row,
+            font_list,
+            row(tr("默认文字颜色", "Default text color"), Some(color_description(&p.document_color).into()),
+                appearance_colors("appearance-text", p.document_color.as_deref(), false, cx)).into_any_element(),
+            row(tr("页面背景色", "Page background"), Some(color_description(&p.document_background).into()), background).into_any_element(),
+        ]
+    }
+
+
+    pub(crate) fn open_appearance_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_appearance_dialog_for(AppearanceTarget::Document, window, cx);
+    }
+
+    fn open_sidebar_appearance_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_appearance_dialog_for(AppearanceTarget::Sidebar, window, cx);
+    }
+
+    fn open_appearance_dialog_for(&mut self, target: AppearanceTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if target == AppearanceTarget::Document { self.sync_background_hex(cx); }
+        self.appearance_target = target;
+        self.appearance_dialog = true;
+        let preferences = prefs();
+        let font = match target { AppearanceTarget::Document => preferences.document_font, AppearanceTarget::Sidebar => preferences.sidebar_font, AppearanceTarget::Catalogue => preferences.catalogue_font };
+        if let Some(index) = font.as_ref().and_then(|font| themes::installed_fonts().iter().position(|f| f.eq_ignore_ascii_case(font))) {
+            cx.on_next_frame(window, move |w, _, cx| {
+                if w.appearance_dialog && w.appearance_target == target { w.appearance_font_scroll.scroll_to_item(index); cx.notify(); }
+            });
+        } else {
+            self.appearance_font_scroll.set_offset(point(px(0.), px(0.)));
+        }
+        if target != AppearanceTarget::Document { window.focus(&self.focus); } else {
+            self.background_hex.update(cx, |field, cx| field.select_all_text(cx));
+            window.focus(&self.background_hex.focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn close_appearance_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.appearance_dialog = false;
+        self.appearance_font_drag.set(None);
+        if self.view == View::Doc {
+            if let Some(editor) = &self.editor { window.focus(&editor.focus_handle(cx)); }
+        } else {
+            window.focus(&self.focus);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_appearance_dialog(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.appearance_dialog { return None; }
+        // Leave the color input visible in shorter windows; the content still scrolls if needed.
+        let typography = self.appearance_target != AppearanceTarget::Document;
+        let font_list_height = (window.viewport_size().height - px(if typography { 280. } else { 390. })).max(px(60.)).min(px(if typography { 260. } else { 160. }));
+        let dialog = ui::dialog("appearance-dialog").relative().w(px(620.))
+            .max_w(window.viewport_size().width - px(32.)).max_h(window.viewport_size().height - px(48.))
+            .flex().flex_col()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().px(px(24.)).py(px(20.)).text_size(px(15.)).font_weight(FontWeight::SEMIBOLD)
+                .child(match self.appearance_target { AppearanceTarget::Document => tr("字体与页面背景", "Font and page background"), AppearanceTarget::Sidebar => tr("侧栏字体与字号", "Sidebar font and size"), AppearanceTarget::Catalogue => tr("目录字体与字号", "Catalogue font and size") }))
+            .child(ui::close_button("appearance-dialog-close").absolute().top(px(18.)).right(px(20.))
+                .on_click(cx.listener(|w, _, window, cx| w.close_appearance_dialog(window, cx))))
+            .child(div().id("appearance-dialog-content").min_h_0().overflow_y_scroll().px(px(20.)).pb(px(20.))
+                .child(group(None, self.appearance_defaults(font_list_height, cx))));
+        Some(deferred(div().id("appearance-dialog-mask").absolute().inset_0().flex().items_center().justify_center().bg(ui::scrim())
+            .on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| w.close_appearance_dialog(window, cx)))
+            .child(dialog)).with_priority(3).into_any_element())
     }
 
     fn library_page(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1208,7 +1482,7 @@ mod localization_tests {
 
 #[cfg(test)]
 mod preference_tests {
-    use super::Preferences;
+    use super::{Preferences, read_preferences};
 
     #[test]
     fn new_preferences_use_feishu_without_overriding_saved_themes() {
@@ -1225,6 +1499,55 @@ mod preference_tests {
             assert_eq!(saved.theme_id(), expected);
             let round_trip: Preferences = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
             assert_eq!(round_trip.theme_id(), expected);
+        }
+    }
+
+    #[test]
+    fn sidebar_typography_preserves_existing_preferences() {
+        let old: Preferences = serde_json::from_str(r#"{"document_font":"Cambria"}"#).unwrap();
+        assert_eq!(old.sidebar_font, None);
+        assert_eq!(old.sidebar_font_size, 13);
+        let changed: Preferences = serde_json::from_str(r#"{"document_font":"Cambria","sidebar_font":"Arial","sidebar_font_size":18}"#).unwrap();
+        let loaded: Preferences = serde_json::from_str(&serde_json::to_string(&changed).unwrap()).unwrap();
+        assert_eq!(loaded.document_font.as_deref(), Some("Cambria"));
+        assert_eq!(loaded.sidebar_font.as_deref(), Some("Arial"));
+        assert_eq!(loaded.sidebar_font_size, 18);
+    }
+
+    #[test]
+    fn legacy_web_preference_preserves_local_appearance() {
+        let old = read_preferences(br##"{"online_appearance":true,"document_font":"Cambria","document_color":"#123456","document_background":"#F0F0F0","sidebar_font":"Arial","catalogue_font_size":17}"##).unwrap();
+        assert_eq!(old.document_font.as_deref(), Some("Cambria"));
+        assert_eq!(old.document_color.as_deref(), Some("#123456"));
+        assert_eq!(old.document_background.as_deref(), Some("#F0F0F0"));
+        assert_eq!(old.sidebar_font.as_deref(), Some("Arial"));
+        assert_eq!(old.catalogue_font_size, 17);
+    }
+
+    #[test]
+    fn catalogue_size_migrates_once_and_stays_independent() {
+        let mut old = read_preferences(br#"{"sidebar_font":"Arial","sidebar_font_size":18}"#).unwrap();
+        assert_eq!(old.catalogue_font, None);
+        assert_eq!(old.catalogue_font_size, 18);
+        old.sidebar_font_size = 11;
+        old.catalogue_font = Some("Cambria".into());
+        let loaded = read_preferences(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(loaded.sidebar_font_size, 11);
+        assert_eq!(loaded.catalogue_font_size, 18);
+        assert_eq!(loaded.catalogue_font.as_deref(), Some("Cambria"));
+    }
+
+    #[test]
+    fn typography_and_zoom_defaults_and_limits() {
+        let defaults = read_preferences(br#"{}"#).unwrap();
+        assert_eq!(defaults.catalogue_font_size, 13);
+        assert_eq!(defaults.document_zoom, 100);
+        for (json, sidebar, catalogue, zoom) in [
+            (br#"{"sidebar_font_size":25,"document_zoom":300}"#.as_slice(), 18, 18, 200),
+            (br#"{"sidebar_font_size":9,"catalogue_font_size":25,"document_zoom":1}"#.as_slice(), 11, 18, 50),
+        ] {
+            let p = read_preferences(json).unwrap();
+            assert_eq!((p.sidebar_font_size, p.catalogue_font_size, p.document_zoom), (sidebar, catalogue, zoom));
         }
     }
 }

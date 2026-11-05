@@ -98,6 +98,7 @@ mod native {
     }
 
     pub async fn run(html: String, title: String, job: Job, ns_view: usize, cx: &mut AsyncApp) -> Result<bool, String> {
+        let html = cx.background_executor().spawn(async move { crate::html::prepare_print_html(html) }).await;
         let width_px = (PAPER.0 - 2. * MARGIN_X) * PX_PER_PT;
         let (holder, web) = unsafe {
             let holder: *mut Object = msg_send![class!(NSWindow), alloc];

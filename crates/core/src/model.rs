@@ -391,6 +391,12 @@ pub enum Align {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableCell {
+    /// Process-local identity used to preserve metadata across undo snapshots.
+    pub id: BlockId,
+    /// Corresponding cloud cell, if imported.
+    pub source_id: Option<String>,
+    /// Persistent local identity for a cell not yet represented in the cloud.
+    pub sync_id: Option<String>,
     pub blocks: Vec<Block>,
     pub bg: Option<ColorName>,
     pub valign: Option<String>,
@@ -401,6 +407,9 @@ pub struct TableCell {
 impl TableCell {
     pub fn empty() -> Self {
         TableCell {
+            id: BlockId::new(),
+            source_id: None,
+            sync_id: None,
             blocks: vec![Block::text("")],
             bg: None,
             valign: None,
@@ -411,7 +420,9 @@ impl TableCell {
 
     /// A grid slot hidden under a merged cell (spans 0 × 0, no content).
     pub fn covered() -> Self {
-        TableCell { blocks: vec![], bg: None, valign: None, colspan: 0, rowspan: 0 }
+        // Covered slots have no identity or content; zero is reserved from
+        // BlockId::new() and is never entered in the sync-identity map.
+        TableCell { id: BlockId(0), source_id: None, sync_id: None, blocks: vec![], bg: None, valign: None, colspan: 0, rowspan: 0 }
     }
 
     pub fn is_covered(&self) -> bool {
@@ -870,6 +881,10 @@ impl Countdown {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub id: BlockId,
+    /// Stable identity of a corresponding cloud block, when imported from Feishu.
+    pub source_id: Option<String>,
+    /// Persistent local identity for a block not yet represented in the cloud.
+    pub sync_id: Option<String>,
     pub kind: BlockKind,
     pub text: RichText,
     pub align: Align,
@@ -886,6 +901,8 @@ impl Block {
     pub fn new(kind: BlockKind, text: RichText) -> Self {
         Block {
             id: BlockId::new(),
+            source_id: None,
+            sync_id: None,
             kind,
             text,
             align: Align::Left,
@@ -909,12 +926,20 @@ impl Block {
         let mut b = self.clone();
         fn walk(b: &mut Block) {
             b.id = BlockId::new();
+            b.source_id = None;
+            b.sync_id = None;
+            if let BlockKind::Raw { xml, .. } = &mut b.kind {
+                crate::docxml::clear_raw_source_id(xml);
+            }
             for c in &mut b.children {
                 walk(c);
             }
             if let BlockKind::Table(t) = &mut b.kind {
                 for row in &mut t.rows {
                     for cell in row {
+                        cell.id = if cell.is_covered() { BlockId(0) } else { BlockId::new() };
+                        cell.source_id = None;
+                        cell.sync_id = None;
                         for c in &mut cell.blocks {
                             walk(c);
                         }
@@ -987,6 +1012,32 @@ fn link_line(t: &RichText) -> Vec<(String, Option<String>)> {
 }
 
 impl Document {
+    /// Assign persistent local identities only to nodes without cloud identities.
+    /// Returns whether the document changed.
+    pub fn ensure_sync_ids(&mut self) -> bool {
+        fn walk(blocks: &mut [Block], changed: &mut bool) {
+            for block in blocks {
+                if block.source_id.is_none() && block.sync_id.is_none() {
+                    block.sync_id = Some(uuid::Uuid::new_v4().to_string());
+                    *changed = true;
+                }
+                walk(&mut block.children, changed);
+                if let BlockKind::Table(table) = &mut block.kind {
+                    for cell in table.rows.iter_mut().flatten() {
+                        if !cell.is_covered() && cell.source_id.is_none() && cell.sync_id.is_none() {
+                            cell.sync_id = Some(uuid::Uuid::new_v4().to_string());
+                            *changed = true;
+                        }
+                        walk(&mut cell.blocks, changed);
+                    }
+                }
+            }
+        }
+        let mut changed = false;
+        walk(&mut self.blocks, &mut changed);
+        changed
+    }
+
     /// A fresh, untouched document: no title and a single empty paragraph.
     pub fn is_blank(&self) -> bool {
         self.title.is_empty()
@@ -1004,7 +1055,11 @@ impl Document {
                     if !out.is_empty() {
                         out.push('\n');
                     }
-                    out.push_str(&b.text.plain_text());
+                    if b.text.text.contains('\u{fffc}') {
+                        out.push_str(&b.text.plain_text());
+                    } else {
+                        out.push_str(&b.text.text);
+                    }
                 }
                 walk(&b.children, out);
                 if let BlockKind::Table(t) = &b.kind {
@@ -1057,9 +1112,10 @@ impl Document {
                 return;
             }
             let mut line: Option<Vec<(String, Option<String>)>> = None;
+            let first_link = out.len();
             for (_, m) in b.text.spans() {
                 let Some(l) = m.inline.as_ref().and_then(Inline::doc_link) else { continue };
-                if out.iter().any(|d| d.block == here && d.target == l.id) {
+                if out[first_link..].iter().any(|d| d.target == l.id) {
                     continue;
                 }
                 let line = line.get_or_insert_with(|| link_line(&b.text)).clone();
@@ -1093,6 +1149,54 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn document_search_and_backlinks_keep_nested_order_and_per_block_deduplication() {
+        let doc = crate::docxml::parse(concat!(
+            "<title>T</title>",
+            "<p>Hello <cite type=\"doc\" doc-id=\"a\">A</cite> and ",
+            "<cite type=\"doc\" doc-id=\"b\">B</cite> / ",
+            "<cite type=\"doc\" doc-id=\"a\">A again</cite> = <latex>x+y</latex></p>",
+            "<blockquote><p>two <cite type=\"doc\" doc-id=\"a\">A</cite></p></blockquote>",
+        )).unwrap();
+        assert_eq!(doc.plain_text(), "Hello  and  /  = x+y\ntwo ");
+        let line = vec![
+            ("Hello ".into(), None), ("A".into(), Some("a".into())),
+            (" and ".into(), None), ("B".into(), Some("b".into())),
+            (" / ".into(), None), ("A again".into(), Some("a".into())),
+            (" = x+y".into(), None),
+        ];
+        assert_eq!(doc.doc_links(), vec![
+            DocLink { target: "a".into(), block: 0, line: line.clone() },
+            DocLink { target: "b".into(), block: 0, line },
+            DocLink { target: "a".into(), block: 2, line: vec![
+                ("two ".into(), None), ("A".into(), Some("a".into())),
+            ] },
+        ]);
+    }
+
+    #[test]
+    fn covered_cells_have_no_process_or_sync_identity() {
+        let covered = TableCell::covered();
+        assert_eq!(covered.id, BlockId(0));
+        assert_ne!(TableCell::empty().id, covered.id);
+        let table = Table {
+            col_widths: vec![100., 100.],
+            header_rows: 0,
+            header_col: false,
+            rows: vec![vec![TableCell { colspan: 2, ..TableCell::empty() }, covered]],
+        };
+        let mut doc = Document {
+            blocks: vec![Block::new(BlockKind::Table(table), RichText::default())],
+            ..Document::default()
+        };
+        assert!(doc.ensure_sync_ids());
+        let copy = doc.blocks[0].fresh_ids();
+        let BlockKind::Table(table) = &copy.kind else { panic!("table expected") };
+        assert_ne!(table.rows[0][0].id, BlockId(0));
+        assert_eq!(table.rows[0][1].id, BlockId(0));
+        assert!(table.rows[0][1].sync_id.is_none());
+    }
+
 
     #[test]
     fn rich_text_replace_and_marks() {

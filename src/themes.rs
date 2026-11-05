@@ -221,10 +221,18 @@ impl Style {
     }
     /// A colour property: its own value, its token's, or `None` (inherit).
     pub fn color(&self, key: &str) -> Option<Hsla> {
+        if std::ptr::eq(self, active()) {
+            let overrides = APPEARANCE.read().unwrap();
+            match key { "page.color" if overrides.1.is_some() => return overrides.1, "page.bg" if overrides.2.is_some() => return overrides.2, _ => {} }
+        }
         match self.values.get(key) {
             Some(Val::C(c)) => Some(*c),
             Some(Val::Inherit) => None,
             _ => match self.def(key) {
+                Def::Tok("bg_body") if key == "page.bg" => {
+                    let i = TOKENS.iter().position(|name| *name == "bg_body").unwrap();
+                    Some(self.tokens[i].unwrap_or_else(crate::theme::Theme::page_background))
+                }
                 Def::Tok(t) => Some(self.token(t)),
                 Def::Rgb(v) => Some(crate::theme::c(v)),
                 _ => None,
@@ -237,11 +245,23 @@ impl Style {
             _ => match self.def(key) { Def::B(b) => b, _ => BY_KEY.get(key).is_some_and(|&i| matches!(PROPS[i].craft, Def::B(true))) },
         }
     }
-    pub fn font(&self, key: &str) -> &'static str {
-        match self.values.get(key) {
+    fn font_with_override(&self, key: &str, selected: Option<&'static str>) -> &'static str {
+        let original: &'static str = match self.values.get(key) {
             Some(Val::F(f)) => f,
             _ => match self.def(key) { Def::Family(f) => f, _ => SYSTEM },
+        };
+        if let Some(font) = selected {
+            if key == "page.font" { return font; }
+            if (key == "title.font" || (key.starts_with('h') && key.ends_with(".font")))
+                && original == self.font_with_override("page.font", None)
+            { return font; }
         }
+        original
+    }
+    pub fn font(&self, key: &str) -> &'static str {
+        let document_font = key == "page.font" || key == "title.font" || (key.starts_with('h') && key.ends_with(".font"));
+        let selected = if document_font && std::ptr::eq(self, active()) { APPEARANCE.read().unwrap().0 } else { None };
+        self.font_with_override(key, selected)
     }
     pub fn line(&self, key: &str) -> LineStyle {
         match self.values.get(key) {
@@ -300,6 +320,16 @@ static ERRORS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 static ACTIVE: AtomicPtr<Style> = AtomicPtr::new(std::ptr::null_mut());
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static PLAIN: LazyLock<Style> = LazyLock::new(|| Style::plain(false));
+static INSTALLED_FONTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+static APPEARANCE: RwLock<(Option<&'static str>, Option<Hsla>, Option<Hsla>)> = RwLock::new((None, None, None));
+
+pub fn installed_fonts() -> &'static [String] { INSTALLED_FONTS.get().map(Vec::as_slice).unwrap_or(&[]) }
+
+pub fn appearance_color(s: &str) -> Option<Hsla> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) { return None }
+    parse_color(s)
+}
 
 /// The theme being drawn.
 pub fn active() -> &'static Style {
@@ -634,11 +664,10 @@ static ALL_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 pub fn all_loaded() -> bool { ALL_LOADED.load(Ordering::Relaxed) }
 
 /// Startup reads only the selected theme. The picker requests the full catalog.
-/// Enumerate installed fonts only if a user stylesheet names a concrete family.
+/// Enumerate installed fonts for the appearance picker and stylesheet parsing.
 pub fn load(selected: &str, all: bool, font_source: impl FnOnce() -> Vec<String>) {
-    let fonts = std::cell::OnceCell::new();
-    let mut source = Some(font_source);
-    let mut resolve_fonts = || fonts.get_or_init(|| source.take().unwrap()()).as_slice();
+    let fonts = INSTALLED_FONTS.get_or_init(|| { let mut fonts = font_source(); fonts.sort_by_key(|f| f.to_lowercase()); fonts.dedup(); fonts });
+    let mut resolve_fonts = || fonts.as_slice();
     let mut list: Vec<Theme> = vec![];
     for (id, css) in BUNDLED.iter().copied().filter(|(id, _)| all || *id == selected) {
         match parse(css, &[]) {
@@ -690,6 +719,9 @@ pub fn load(selected: &str, all: bool, font_source: impl FnOnce() -> Vec<String>
 pub fn select(id: &str) -> String {
     let list = THEMES.read().unwrap();
     let Some(t) = list.iter().find(|t| t.id == id).or_else(|| list.first()) else { return "craft".into() };
+    let p = crate::settings::prefs();
+    let font = p.document_font.as_ref().and_then(|f| installed_fonts().iter().find(|name| name.eq_ignore_ascii_case(f))).map(String::as_str);
+    *APPEARANCE.write().unwrap() = (font, p.document_color.as_deref().and_then(appearance_color), p.document_background.as_deref().and_then(appearance_color));
     ACTIVE.store(t.style as *const Style as *mut Style, Ordering::Relaxed);
     GENERATION.fetch_add(1, Ordering::Relaxed);
     crate::settings::set_base(t.style.feishu);
@@ -784,7 +816,7 @@ fn base_named(kind: &str, name: &str, feishu: bool) -> Option<Hsla> {
 #[cfg(test)]
 fn base_css(feishu: bool, name: &str, name_en: &str, description: &str) -> String {
     let st = Style::plain(feishu);
-    let mut out = format!("/*\n * quiet.md 文档主题：{name}\n *\n * 每个属性都写着当前的值。改完保存，应用里立即生效。\n * 选择器与属性的说明见 docs/THEMES.md。\n */\n\n:root {{\n");
+    let mut out = format!("/*\n * quiet.md 文档主题：{name}\n *\n * 默认页面底色取自 Typora 参考截图。\n * 每个属性都写着当前的值。改完保存，应用里立即生效。\n * 选择器与属性的说明见 docs/THEMES.md。\n */\n\n:root {{\n");
     out += &format!("  --theme-name: \"{name}\";\n  --theme-name-en: \"{name_en}\";\n  --theme-author: \"quiet.md\";\n  --theme-description: \"{description}\";\n  /* 块的画法：craft 或 feishu */\n  --theme-base: {};\n", if feishu { "feishu" } else { "craft" });
     for (kind, title) in [("color", "文字颜色"), ("highlight", "文字高亮"), ("background", "块背景"), ("callout", "高亮块底色"), ("border", "高亮块边框")] {
         out += &format!("\n  /* {title} */\n");
@@ -832,6 +864,38 @@ const FEISHU_DESCRIPTION: &str = "飞书文档的正文样式：16 / 26，标题
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn document_font_override_preserves_distinct_theme_fonts() {
+        let mut style = Style::plain(false);
+        for key in ["page.font", "title.font", "h1.font"] {
+            assert_eq!(style.font_with_override(key, Some("Courier New")), "Courier New");
+            assert_eq!(style.font_with_override(key, None), SYSTEM);
+        }
+        style.values.insert("title.font", Val::F("Georgia"));
+        assert_eq!(style.font_with_override("title.font", Some("Courier New")), "Georgia");
+        assert_eq!(style.font_with_override("pre.font", Some("Courier New")), SYSTEM_MONO);
+    }
+
+    #[test]
+    fn appearance_colors_require_six_digit_hex() {
+        assert!(appearance_color("#12aBcD").is_some());
+        for value in ["red", "#123", "#12345678", "#12zz56", "123456", ""] {
+            assert!(appearance_color(value).is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn custom_page_background_overrides_default() {
+        for css in [
+            ".page { background-color: #246810; }",
+            ":root { --token-bg-body: #246810; }",
+        ] {
+            let (style, _, _) = parse(css, &[]).unwrap();
+            assert_eq!(css_color(style.color("page.bg").unwrap()), "#246810");
+        }
+    }
 
     #[test]
     fn bundled_themes_are_complete_and_clean() {

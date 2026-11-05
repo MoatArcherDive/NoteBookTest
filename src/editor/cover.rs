@@ -159,11 +159,14 @@ impl Editor {
     // ---- icon
 
     /// The icon is file-level meta: saved, but outside undo.
-    fn set_doc_icon(&mut self, icon: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set_doc_icon(&mut self, icon: Option<String>, cx: &mut Context<Self>) {
         if self.core.doc.icon == icon {
             return;
         }
         self.core.doc.icon = icon;
+        if let Some(doc) = &mut self.ro_doc {
+            doc.icon = self.core.doc.icon.clone();
+        }
         self.core.generation += 1;
         cx.emit(EditorEvent::Changed);
         cx.notify();
@@ -172,6 +175,7 @@ impl Editor {
     pub(super) fn pick_doc_icon(&mut self, e: Option<&'static emoji::Emoji>, cx: &mut Context<Self>) {
         self.set_doc_icon(e.map(|e| e.char.to_string()), cx);
     }
+
 
     /// 添加图标: a random emoji at once, then its picker opens on it.
     fn add_doc_icon(&mut self, window: &mut Window, cx: &mut Context<Self>) {

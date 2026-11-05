@@ -114,6 +114,7 @@ pub struct Editor {
     /// (plus the title header and the click area below), so only what is on
     /// screen is laid out and painted.
     pub list: ListState,
+    pub(crate) restore_scroll: Option<ListOffset>,
     pub(super) items: Vec<super::render::Item>,
     /// Per-item change keys of the last frame, diffed to re-measure only the
     /// items that changed.
@@ -189,13 +190,12 @@ pub struct Editor {
     /// Headings folded in the catalogue only.
     pub(super) cat_collapsed: std::collections::HashSet<BlockId>,
     pub(super) cat_active: Option<BlockId>,
-    /// Active row the catalogue list was last scrolled to.
-    pub(super) cat_shown_active: Option<BlockId>,
     /// Page scroll position and caret block of the last frame.
     pub(super) cat_seen: ((usize, u32), BlockId),
     /// Heading just clicked in the catalogue.
     pub(super) cat_jump: Option<BlockId>,
     pub(super) cat_scroll: UniformListScrollHandle,
+    pub(super) cat_scroll_drag: Rc<Cell<Option<Pixels>>>,
     pub(super) scrollbar: Rc<super::scrollbar::Scrollbar>,
     /// Column-gap hover: (grid, gap index, over the 新增分栏 circle).
     pub(super) gap_hover: Option<(BlockId, usize, bool)>,
@@ -262,7 +262,7 @@ fn looks_like_url(q: &str) -> bool {
 }
 
 impl Editor {
-    pub fn new(doc: Document, modified: u64, page_width: PageWidth, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(core: Core, modified: u64, page_width: PageWidth, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let link_field = cx.new(|cx| {
             let mut f = TextField::new("粘贴或输入链接", cx);
             f.tab_events = true;
@@ -350,11 +350,12 @@ impl Editor {
         let (rm, rm_subs) = super::reminder::RmUi::new(window, cx);
         subs.extend(rm_subs);
         let mut e = Editor {
-            core: Core::new(doc),
+            core,
             focus: cx.focus_handle(),
             cache: Default::default(),
             block_bounds: Default::default(),
             list: ListState::new(0, ListAlignment::Top, px(600.)),
+            restore_scroll: None,
             items: vec![],
             item_keys: vec![],
             items_key: None,
@@ -406,12 +407,12 @@ impl Editor {
             cat_generation: None,
             cat_collapsed: Default::default(),
             cat_active: None,
-            cat_shown_active: None,
             // An impossible scroll position: the first frame picks the
             // active heading from the viewport, not from the caret.
             cat_seen: ((usize::MAX, 0), TITLE),
             cat_jump: None,
             cat_scroll: UniformListScrollHandle::new(),
+            cat_scroll_drag: Rc::default(),
             scrollbar: Rc::default(),
             gap_hover: None,
             col_drag: None,

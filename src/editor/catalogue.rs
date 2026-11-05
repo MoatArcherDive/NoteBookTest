@@ -24,7 +24,7 @@ const RESPONSE_MAX: f32 = 265.;
 /// Catalogue padding-top; the pin row (PIN_HEIGHT 40) sits below it.
 const CAT_TOP: f32 = 54.;
 const PIN_H: f32 = 40.;
-/// Item height: a 22px line plus 8px padding-bottom.
+/// Default row height: a 22px line plus 8px padding-bottom.
 const ROW_H: f32 = 30.;
 /// Indent per level.
 const INDENT: f32 = 14.;
@@ -322,7 +322,7 @@ impl Editor {
                 .top(px(top))
                 .pl(px(4.))
                 .pt(px(PIN_H))
-                .block_mouse_except_scroll()
+                .occlude()
                 .cursor(CursorStyle::Arrow)
                 .when(list_w.is_none(), |d| d.w(px(42.)).h(px(PIN_H)).pt_0())
                 .when(floating, |d| d.bg(theme::rgbaf(255, 255, 255, 0.96)).rounded(px(8.)))
@@ -352,40 +352,66 @@ impl Editor {
             rows.push((e.clone(), parent));
         }
         let active = self.cat_active;
-        if active != self.cat_shown_active {
-            self.cat_shown_active = active;
-            if let Some(ix) = rows.iter().position(|(e, _)| Some(e.id) == active) {
-                self.cat_scroll.scroll_to_item(ix, ScrollStrategy::Top);
-            }
-        }
         let collapsed = self.cat_collapsed.clone();
         let text_w = width - 11.;
+        let title_size = crate::settings::catalogue_text_size(14.);
+        let entry_size = crate::settings::catalogue_text_size(13.);
+        let text_color = crate::editor_theme::style().color("page.color").unwrap_or_else(Theme::text);
+        let line_h = 22_f32.max(title_size + 8.);
+        let row_h = ROW_H.max(line_h + 8.);
+        let font = crate::settings::catalogue_font();
         let mut style = window.text_style();
-        style.font_family = theme::UI_FONT.into();
+        style.font_family = font.into();
         let entity = cx.entity();
         let n = rows.len();
         let rows = Rc::new(rows);
+        let height = (n as f32 * row_h + 22.).min(max_h.max(row_h));
         let list = uniform_list("catalogue-list", n, move |range, window, _| {
             range
                 .map(|ix| {
                     let (e, parent) = &rows[ix];
                     let folded = collapsed.contains(&e.id);
                     let title = e.id == TITLE;
-                    let size = if title { 14. } else { 13. };
-                    let indent = INDENT * (e.level - 1) as f32;
-                    let avail = text_w - indent - 16.;
-                    let runs = crate::editor_ui::ui_runs(&e.text, &TextStyle { font_size: px(size).into(), ..style.clone() }, &[], style.color);
-                    let full_w = window.text_system().shape_line(e.text.clone(), px(size), &runs, None).width;
-                    // The outline: quiet secondary rows, the current one in full text colour.
+                    let size = if title { title_size } else { entry_size };
+                    // Keep some text visible even for deeply nested headings in a narrow pane.
+                    let indent = (INDENT * (e.level - 1) as f32).min((text_w - 32.).max(0.));
+                    let avail = (text_w - indent - 16.).max(0.);
                     let on = Some(e.id) == active;
-                    let color = if on { Theme::text() } else { Theme::text_caption() };
+                    let bold = title || e.h1 || on;
+                    let mut runs = crate::editor_ui::ui_runs(&e.text, &TextStyle { font_size: px(size).into(), ..style.clone() }, &[], style.color);
+                    if bold {
+                        for run in &mut runs {
+                            run.font.weight = FontWeight::SEMIBOLD;
+                        }
+                    }
+                    let line = window.text_system().shape_line(e.text.clone(), px(size), &runs, None);
+                    let truncated = f32::from(line.width) > avail;
+                    let text = if truncated {
+                        let mut suffix_run = style.to_run("…".len());
+                        if bold { suffix_run.font.weight = FontWeight::SEMIBOLD; }
+                        let suffix_w = window.text_system().shape_line("…".into(), px(size), &[suffix_run], None).width;
+                        let mut cut = 0;
+                        for (i, ch) in e.text.char_indices() {
+                            let end = i + ch.len_utf8();
+                            if line.x_for_index(end) + suffix_w > px(avail) { break; }
+                            cut = end;
+                        }
+                        div().flex().whitespace_nowrap()
+                            .when(cut > 0, |d| d.child(ui_text(e.text[..cut].to_string())))
+                            .child(div().flex_none().child("…"))
+                            .into_any_element()
+                    } else {
+                        ui_text(e.text.clone()).into_any_element()
+                    };
+                    // Use the document's text colour so custom dark backgrounds remain legible.
+                    let color = if on { text_color } else { text_color.opacity(0.85) };
                     let (id, ent, ent2) = (e.id, entity.clone(), entity.clone());
                     let group = SharedString::from(format!("cat-row-{ix}"));
                     let row = div()
                         .id(("cat-row", ix))
                         .group(group.clone())
                         .w(px(text_w))
-                        .h(px(ROW_H))
+                        .h(px(row_h))
                         .pb(px(8.))
                         .pl(px(indent))
                         .flex()
@@ -395,9 +421,10 @@ impl Editor {
                                 .id(("cat-fold", ix))
                                 .flex_none()
                                 .w(px(16.))
-                                .h(px(22.))
-                                .px(px(3.))
-                                .py(px(6.))
+                                .h(px(line_h))
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .when(*parent, |d| {
                                     d.child(
                                         div()
@@ -423,27 +450,28 @@ impl Editor {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .h(px(22.))
+                                .h(px(line_h))
                                 .text_size(px(size))
-                                .line_height(px(22.))
-                                .when(title || e.h1 || on, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                .font_family(font)
+                                .line_height(px(line_h))
+                                .when(bold, |d| d.font_weight(FontWeight::SEMIBOLD))
                                 .text_color(color)
-                                .hover(|s| s.text_color(Theme::text()))
+                                .hover(move |s| s.text_color(text_color))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
-                                .text_ellipsis()
-                                .child(ui_text(e.text.clone())),
+                                .child(text),
                         )
                         .on_click(move |_, _, cx| ent.update(cx, |ed, cx| ed.jump_to_heading(id, cx)));
-                    if f32::from(full_w) > avail { row.tip_label(e.text.to_string(), TipSide::Right) } else { row }
+                    if truncated { row.tip_label(e.text.to_string(), TipSide::Right) } else { row }
                 })
                 .collect()
         })
         .track_scroll(self.cat_scroll.clone())
         .w(px(width - 11.))
-        .h(px((n as f32 * ROW_H + 22.).min(max_h.max(ROW_H))))
+        .h(px(height))
         .pb(px(22.));
-        div().w(px(width)).child(list).into_any_element()
+        let scroll = self.cat_scroll.0.borrow().base_handle.clone();
+        div().relative().w(px(width)).h(px(height)).child(list).child(crate::ui::scroll_thumb(scroll, self.cat_scroll_drag.clone())).into_any_element()
     }
 }
 

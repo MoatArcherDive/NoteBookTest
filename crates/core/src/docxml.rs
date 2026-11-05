@@ -7,6 +7,7 @@ use crate::model::*;
 use anyhow::{Result, anyhow};
 use quick_xml::Reader;
 use quick_xml::events::Event;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug)]
 enum Node {
@@ -80,18 +81,20 @@ fn attrs_of(e: &quick_xml::events::BytesStart) -> Result<Vec<(String, String)>> 
 pub fn parse(xml: &str) -> Result<Document> {
     let nodes = parse_dom(xml)?;
     let mut doc = Document { blocks: vec![], ..Default::default() };
-    let mut top = nodes;
+    let mut top = nodes.as_slice();
     // Only known document wrappers may be unwrapped; unknown blocks keep their attributes.
     loop {
-        let els: Vec<&Element> = top.iter().filter_map(|n| if let Node::El(e) = n { Some(e) } else { None }).collect();
-        if els.len() == 1 && matches!(els[0].name.as_str(), "document" | "doc" | "fragment")
+        let mut els = top.iter().filter_map(|n| if let Node::El(e) = n { Some(e) } else { None });
+        if let Some(e) = els.next()
+            && els.next().is_none()
+            && matches!(e.name.as_str(), "document" | "doc" | "fragment")
             && top.iter().all(|n| !matches!(n, Node::Text(t) if !t.trim().is_empty())) {
-            top = els[0].children.clone();
+            top = &e.children;
         } else {
             break;
         }
     }
-    for n in &top {
+    for n in top {
         if let Node::El(e) = n
             && e.name == "title"
         {
@@ -151,8 +154,7 @@ fn parse_block_node(n: &Node, out: &mut Vec<Block>) {
 fn parse_blocks(children: &[Node]) -> Vec<Block> {
     let mut out = vec![];
     // Runs of inline content directly inside a container become a paragraph.
-    let mut pending: Vec<Node> = vec![];
-    let flush = |pending: &mut Vec<Node>, out: &mut Vec<Block>| {
+    let flush = |pending: &[Node], out: &mut Vec<Block>| {
         if pending.iter().any(|n| match n {
             Node::Text(t) => !t.trim().is_empty(),
             Node::El(_) => true,
@@ -161,18 +163,18 @@ fn parse_blocks(children: &[Node]) -> Vec<Block> {
             trim_rich(&mut b.text);
             out.push(b);
         }
-        pending.clear();
     };
-    for n in children {
-        match n {
-            Node::El(e) if is_block_tag(&e.name) || e.name == "title" => {
-                flush(&mut pending, &mut out);
-                parse_block(e, &mut out);
-            }
-            other => pending.push(other.clone()),
+    let mut start = 0;
+    for (i, n) in children.iter().enumerate() {
+        if let Node::El(e) = n
+            && (is_block_tag(&e.name) || e.name == "title")
+        {
+            flush(&children[start..i], &mut out);
+            parse_block(e, &mut out);
+            start = i + 1;
         }
     }
-    flush(&mut pending, &mut out);
+    flush(&children[start..], &mut out);
     out
 }
 
@@ -284,8 +286,11 @@ fn parse_block(e: &Element, out: &mut Vec<Block>) {
                 })
                 .map(|c| {
                     let ratio = c.attr("width-ratio").and_then(|v| v.parse().ok()).unwrap_or(0.5);
-                    Block::new(BlockKind::Column { ratio }, RichText::default())
-                        .with_children(non_empty(parse_blocks(&c.children)))
+                    let mut col = Block::new(BlockKind::Column { ratio }, RichText::default())
+                        .with_children(non_empty(parse_blocks(&c.children)));
+                    col.source_id = c.attr("id").filter(|id| !id.is_empty()).map(str::to_owned);
+                    col.sync_id = c.attr("data-quiet-sync-id").filter(|id| !id.is_empty()).map(str::to_owned);
+                    col
                 })
                 .collect();
             Block::new(BlockKind::Grid, RichText::default()).with_children(cols)
@@ -297,8 +302,16 @@ fn parse_block(e: &Element, out: &mut Vec<Block>) {
             Block::new(BlockKind::File(file_of(figure_source(e).unwrap_or(e), view)), RichText::default())
         }
         _ if is_inline_object(name) => Block::new(BlockKind::Text, inline_text(std::slice::from_ref(&Node::El(e.clone())))),
-        _ => Block::new(BlockKind::Raw { tag: e.name.clone(), xml: serialize_el(e) }, RichText::default()),
+        _ => {
+            let mut raw = e.clone();
+            raw.attrs.retain(|(name, _)| name != "data-quiet-sync-id");
+            Block::new(BlockKind::Raw { tag: e.name.clone(), xml: serialize_el(&raw) }, RichText::default())
+        }
     };
+    if !is_inline_object(name) {
+        block.source_id = e.attr("id").filter(|id| !id.is_empty()).map(str::to_owned);
+    }
+    block.sync_id = e.attr("data-quiet-sync-id").filter(|id| !id.is_empty()).map(str::to_owned);
     block.align = parse_align(e);
     // Images are centred by default.
     if e.name == "img" && e.attr("align").is_none() {
@@ -333,6 +346,8 @@ fn parse_li(li: &Element, ordered: bool) -> Block {
         BlockKind::Bullet
     };
     let mut b = Block::new(kind, text);
+    b.source_id = li.attr("id").filter(|id| !id.is_empty()).map(str::to_owned);
+    b.sync_id = li.attr("data-quiet-sync-id").filter(|id| !id.is_empty()).map(str::to_owned);
     b.align = parse_align(li);
     b.folded = li.attr("folded") == Some("true");
     b.bg = parse_bg(li, &b.kind);
@@ -352,9 +367,12 @@ fn bg_attr(b: &Block) -> String {
     }
 }
 
-fn split_inline_and_blocks(children: &[Node]) -> (Vec<Node>, Vec<Block>) {
+fn split_inline_and_blocks(children: &[Node]) -> (Cow<'_, [Node]>, Vec<Block>) {
     // A `<source>` inside a paragraph is an inline attachment (文本视图).
     let is_block = |n: Option<&Node>| matches!(n, Some(Node::El(e)) if is_block_tag(&e.name) && e.name != "source");
+    if !children.iter().any(|n| is_block(Some(n))) {
+        return (Cow::Borrowed(children), vec![]);
+    }
     let mut inline = vec![];
     let mut blocks = vec![];
     for (i, n) in children.iter().enumerate() {
@@ -369,7 +387,7 @@ fn split_inline_and_blocks(children: &[Node]) -> (Vec<Node>, Vec<Block>) {
             other => inline.push(other.clone()),
         }
     }
-    (inline, blocks)
+    (Cow::Owned(inline), blocks)
 }
 
 fn parse_table(e: &Element) -> Table {
@@ -450,6 +468,9 @@ fn parse_table(e: &Element) -> Table {
                     }
                 }
                 rows[r][c] = TableCell {
+                    id: BlockId::new(),
+                    source_id: td.attr("id").filter(|id| !id.is_empty()).map(str::to_owned),
+                    sync_id: td.attr("data-quiet-sync-id").filter(|id| !id.is_empty()).map(str::to_owned),
                     blocks: non_empty(parse_blocks(&td.children)),
                     bg: td.attr("background-color").map(|s| ColorName(s.into())),
                     valign: td.attr("vertical-align").map(str::to_string),
@@ -625,8 +646,12 @@ fn walk_inline(nodes: &[Node], marks: &Marks, out: &mut RichText) {
                 let t = &t[..t[body_end..].find('\n').map_or(t.len(), |k| body_end + k)];
                 // Leading: up to the last newline before the text.
                 let body_start = t.len() - t.trim_start_matches(ws).len();
-                let t = t[t[..body_start].rfind('\n').map_or(0, |k| k + 1)..].replace(['\n', '\r'], "");
-                out.push(&t, marks.clone());
+                let t = &t[t[..body_start].rfind('\n').map_or(0, |k| k + 1)..];
+                if t.contains('\n') || t.contains('\r') {
+                    out.push(&t.replace(['\n', '\r'], ""), marks.clone());
+                } else {
+                    out.push(t, marks.clone());
+                }
             }
             Node::El(e) => {
                 let mut m = marks.clone();
@@ -758,7 +783,9 @@ fn write_blocks(blocks: &[Block], s: &mut String, depth: usize) {
                         BlockKind::Ordered { seq: Some(n) } => format!(" seq=\"{n}\""),
                         _ => String::new(),
                     };
-                    s.push_str(&format!("<li{seq}{}{}{}>", align_attr(li.align), bg_attr(li), folded_attr(li.folded)));
+                    let source = li.source_id.as_ref().map(|id| format!(" id=\"{}\"", esc_attr(id))).unwrap_or_default();
+                    let sync = li.sync_id.as_ref().map(|id| format!(" data-quiet-sync-id=\"{}\"", esc_attr(id))).unwrap_or_default();
+                    s.push_str(&format!("<li{source}{sync}{seq}{}{}{}>", align_attr(li.align), bg_attr(li), folded_attr(li.folded)));
                     write_inline(&li.text, s);
                     // An empty item's first child paragraph would be read
                     // back as the item's own text (parse_li); spell it out.
@@ -802,6 +829,7 @@ fn write_text_with_children(b: &Block, close: &str, s: &mut String, depth: usize
 
 fn write_block(b: &Block, s: &mut String, depth: usize) {
     indent(s, depth);
+    let start = s.len();
     let al = format!("{}{}", align_attr(b.align), bg_attr(b));
     let fo = folded_attr(b.folded && b.kind.has_text());
     match &b.kind {
@@ -912,7 +940,9 @@ fn write_block(b: &Block, s: &mut String, depth: usize) {
             for col in &b.children {
                 let ratio = if let BlockKind::Column { ratio } = col.kind { ratio } else { 0.5 };
                 indent(s, depth + 1);
-                s.push_str(&format!("<column width-ratio=\"{}\">\n", fmt_num(ratio)));
+                let source = col.source_id.as_ref().map(|id| format!(" id=\"{}\"", esc_attr(id))).unwrap_or_default();
+                let sync = col.sync_id.as_ref().map(|id| format!(" data-quiet-sync-id=\"{}\"", esc_attr(id))).unwrap_or_default();
+                s.push_str(&format!("<column{source}{sync} width-ratio=\"{}\">\n", fmt_num(ratio)));
                 write_blocks(&col.children, s, depth + 2);
                 indent(s, depth + 1);
                 s.push_str("</column>\n");
@@ -934,6 +964,17 @@ fn write_block(b: &Block, s: &mut String, depth: usize) {
             }
             s.push('\n');
         }
+    }
+    if let Some(id) = &b.source_id
+        && !matches!(b.kind, BlockKind::Raw { .. })
+        && let Some(end) = s[start..].find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+    {
+        s.insert_str(start + end, &format!(" id=\"{}\"", esc_attr(id)));
+    }
+    if let Some(id) = &b.sync_id
+        && let Some(end) = s[start..].find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+    {
+        s.insert_str(start + end, &format!(" data-quiet-sync-id=\"{}\"", esc_attr(id)));
     }
 }
 
@@ -967,6 +1008,12 @@ fn write_table(t: &Table, s: &mut String, depth: usize) {
                 }
                 let tag = if head || (c == 0 && t.header_col) { "th" } else { "td" };
                 s.push_str(&format!("<{tag}"));
+                if let Some(id) = &cell.source_id {
+                    s.push_str(&format!(" id=\"{}\"", esc_attr(id)));
+                }
+                if let Some(id) = &cell.sync_id {
+                    s.push_str(&format!(" data-quiet-sync-id=\"{}\"", esc_attr(id)));
+                }
                 if let Some(c) = &cell.bg {
                     s.push_str(&format!(" background-color=\"{}\"", esc_attr(&c.0)));
                 }
@@ -1093,10 +1140,88 @@ fn serialize_el(e: &Element) -> String {
     s.push_str(&format!("</{}>", e.name));
     s
 }
+/// Remove only a raw block's own cloud ID when it is copied. Nested IDs
+/// belong to the preserved unknown content and are not block identities.
+pub(crate) fn clear_raw_source_id(xml: &mut String) {
+    let Ok(mut nodes) = parse_dom(xml) else { return };
+    let [Node::El(root)] = nodes.as_mut_slice() else { return };
+    if root.attr("id").is_some() {
+        root.attrs.retain(|(name, _)| name != "id");
+        *xml = serialize_el(root);
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_cloud_identity_round_trips_and_copy_drops_only_root_id() {
+        let xml = "<title>T</title>\n<unknown id=\"cloud&amp;id\" other=\"v\"><nested id=\"nested\"/></unknown>\n<other flag=\"yes\"/>\n";
+        let mut doc = parse(xml).unwrap();
+        assert_eq!(doc.blocks[0].source_id.as_deref(), Some("cloud&id"));
+        assert_eq!(serialize(&doc), xml);
+        assert!(doc.ensure_sync_ids());
+        assert!(doc.blocks[0].sync_id.is_none());
+        assert!(doc.blocks[1].sync_id.is_some());
+        let copied = doc.blocks[0].fresh_ids();
+        assert!(copied.source_id.is_none());
+        let BlockKind::Raw { xml, .. } = &copied.kind else { panic!("raw expected") };
+        assert_eq!(xml, "<unknown other=\"v\"><nested id=\"nested\"/></unknown>");
+        let no_id = doc.blocks[1].fresh_ids();
+        let BlockKind::Raw { xml, .. } = &no_id.kind else { panic!("raw expected") };
+        assert_eq!(xml, "<other flag=\"yes\"/>");
+        let mut copy_doc = Document { blocks: vec![copied], ..Document::default() };
+        assert!(copy_doc.ensure_sync_ids());
+        let loaded = parse(&serialize(&copy_doc)).unwrap();
+        assert!(loaded.blocks[0].source_id.is_none());
+        assert_eq!(loaded.blocks[0].sync_id, copy_doc.blocks[0].sync_id);
+    }
+
     use super::*;
+    #[test]
+    fn wrappers_inline_runs_and_nested_blocks_keep_their_content() {
+        let inner = "<title icon=\"📘\">T</title><p> a<b>b</b><source path=\"assets/a\"/>z</p><blockquote> pre <b>bold</b><p>in</p> post <i>tail</i></blockquote><p>hi \n <p>child</p>   </p><mystery x=\"v\"><nested/></mystery>";
+        let wrapped = format!("<document>\n<fragment>{inner}</fragment>\n</document>");
+        let a = parse(&wrapped).unwrap();
+        let b = parse(inner).unwrap();
+        assert_eq!(a.title.text, "T");
+        assert_eq!(a.icon.as_deref(), Some("📘"));
+        assert_eq!(a.blocks.len(), 4);
+        assert_eq!(a.blocks[1].children.iter().map(|b| b.text.text.as_str()).collect::<Vec<_>>(), vec!["pre bold", "in", "post tail"]);
+        assert_eq!(a.blocks[2].text.text, "hi ");
+        assert_eq!(a.blocks[2].children[0].text.text, "child");
+        assert_eq!(serialize(&a), serialize(&b));
+        assert!(serialize(&a).contains("<mystery x=\"v\"><nested/></mystery>"));
+    }
+
+    #[test]
+    fn sync_identities_persist_and_copies_are_fresh() {
+        let fixture = include_str!("../tests/fixtures/all-blocks.xml");
+        assert_eq!(serialize(&parse(fixture).unwrap()), fixture);
+        let mut doc = parse("<title>T</title><p id=\"cloud\">old</p><ul><li>new</li></ul><table><tbody><tr><td id=\"cell-cloud\"><p>cell</p></td><td><p>x</p></td></tr></tbody></table><whiteboard/>").unwrap();
+        assert!(doc.ensure_sync_ids());
+        assert!(!doc.ensure_sync_ids());
+        assert_eq!(doc.blocks[0].source_id.as_deref(), Some("cloud"));
+        assert!(doc.blocks[0].sync_id.is_none());
+        let xml = serialize(&doc);
+        let mut loaded = parse(&xml).unwrap();
+        assert_eq!(serialize(&loaded), xml);
+        assert!(!loaded.ensure_sync_ids());
+        assert_eq!(loaded.blocks[1].sync_id, doc.blocks[1].sync_id);
+        assert_eq!(loaded.blocks[3].sync_id, doc.blocks[3].sync_id);
+        let BlockKind::Table(table) = &loaded.blocks[2].kind else { panic!("table expected") };
+        assert_eq!(table.rows[0][0].source_id.as_deref(), Some("cell-cloud"));
+        assert!(table.rows[0][0].sync_id.is_none());
+        let original_cell_id = table.rows[0][1].sync_id.clone().unwrap();
+        let original_block_id = table.rows[0][1].blocks[0].sync_id.clone().unwrap();
+        let mut copy = Document { blocks: vec![loaded.blocks[2].fresh_ids()], ..Document::default() };
+        assert!(copy.ensure_sync_ids());
+        let BlockKind::Table(copy_table) = &copy.blocks[0].kind else { panic!("table expected") };
+        assert_ne!(copy_table.rows[0][1].sync_id.as_ref().unwrap(), &original_cell_id);
+        assert_ne!(copy_table.rows[0][1].blocks[0].sync_id.as_ref().unwrap(), &original_block_id);
+        assert!(copy_table.rows[0][0].source_id.is_none());
+    }
+
 
     const SAMPLE: &str = r#"<title>示例 <b>文档</b></title>
 <h1 seq="auto">一级标题</h1>

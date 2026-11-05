@@ -5,6 +5,7 @@
  * 系统字体、灰底红字的行内代码、无行号的米色代码块、深色引用竖线、实线分隔线、
  * 蓝色勾选与 Notion 的九色色板。块间距和标题留白按 Notion 的 3px 内边距 + 1px 外边距换算。
  *
+ * 默认页面底色取自 Typora 参考截图。
  * 每个属性都写着当前的值。改完保存，应用里立即生效；说明见 docs/THEMES.md。
  */
 
@@ -138,7 +139,7 @@
 }
 
 .page {
-  background-color: #ffffff;
+  background-color: #a8ccb6;
   color: var(--notion-text);
   font-family: system-ui;
   font-size: 16px;

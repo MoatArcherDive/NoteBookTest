@@ -4,6 +4,7 @@
 //! times. Radius 16, quiet row fills, monochrome page glyphs.
 
 use crate::app::Workspace;
+use crate::feishu_links::FeishuSearchResult;
 use crate::settings::display_title;
 use crate::store::Entry;
 use crate::theme::{self, Theme};
@@ -204,6 +205,34 @@ pub(crate) fn result_info(e: &Entry, q: &str, summary: Option<(String, Vec<Range
         .child(extra_line(e))
 }
 
+enum SearchResult<'a> {
+    Document(&'a Entry),
+    Feishu(FeishuSearchResult),
+}
+
+/// Keep the existing local ordering: recent documents for an empty query,
+/// otherwise title matches before body-only matches.
+fn local_results<'a>(entries: &'a [Entry], q: &str) -> Vec<&'a Entry> {
+    if q.is_empty() {
+        let mut recent: Vec<&Entry> = entries.iter().collect();
+        recent.sort_by_key(|e| std::cmp::Reverse(e.meta.opened.max(e.meta.modified)));
+        recent.truncate(RECENT);
+        return recent;
+    }
+    let mut hits: Vec<(u8, &Entry)> = entries.iter().filter_map(|e| {
+        if e.title.to_lowercase().contains(q) {
+            Some((0, e))
+        } else if e.body.to_lowercase().contains(q) {
+            Some((1, e))
+        } else {
+            None
+        }
+    }).collect();
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.into_iter().map(|(_, e)| e).collect()
+}
+
+
 impl Workspace {
     pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_open = true;
@@ -240,17 +269,25 @@ impl Workspace {
     }
 
     pub(crate) fn pick_search(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.search_results(cx).get(row).map(|e| e.id.clone()) else { return };
+        let target = match self.search_results(cx).get(row) {
+            Some(SearchResult::Document(e)) => (false, e.id.clone()),
+            Some(SearchResult::Feishu(e)) => (true, e.id.clone()),
+            None => return,
+        };
         self.close_search(window, cx);
-        self.open(&id, window, cx);
-        if let Some(ed) = &self.editor {
-            ed.read(cx).focus(window);
+        if target.0 {
+            self.feishu_links.update(cx, |links, cx| links.open_link(&target.1, cx));
+        } else {
+            self.open(&target.1, window, cx);
+            if let Some(ed) = &self.editor {
+                ed.read(cx).focus(window);
+            }
         }
     }
 
     pub(crate) fn move_search_sel(&mut self, delta: isize, cx: &mut Context<Self>) {
         let n = self.search_results(cx).len();
-        if n == 0 { self.search_sel = None; return; }
+        if n == 0 { self.search_sel = None; cx.notify(); return; }
         let next = match self.search_sel {
             Some(i) => (i as isize + delta).rem_euclid(n as isize) as usize,
             None if delta > 0 => 0,
@@ -262,34 +299,32 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Title hits first, then body hits; with no query, 最近浏览.
-    pub fn search_results(&self, cx: &App) -> Vec<&Entry> {
+    /// Local results retain their ordering; saved Feishu links follow them.
+    fn search_results<'a>(&'a self, cx: &App) -> Vec<SearchResult<'a>> {
         let q = self.query(cx);
-        if q.is_empty() {
-            let mut recent: Vec<&Entry> = self.entries.iter().collect();
-            recent.sort_by_key(|e| std::cmp::Reverse(e.meta.opened.max(e.meta.modified)));
-            recent.truncate(RECENT);
-            return recent;
-        }
-        let mut hits: Vec<(u8, &Entry)> = self
-            .entries
-            .iter()
-            .filter_map(|e| {
-                if e.title.to_lowercase().contains(&q) {
-                    Some((0, e))
-                } else if e.body.to_lowercase().contains(&q) {
-                    Some((1, e))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        hits.sort_by_key(|(rank, _)| *rank);
-        hits.into_iter().map(|(_, e)| e).collect()
+        let mut results: Vec<_> = local_results(&self.entries, &q).into_iter().map(SearchResult::Document).collect();
+        results.extend(self.feishu_links.read(cx).search_links(&q).into_iter().map(SearchResult::Feishu));
+        results
     }
 
-    fn search_row(&self, e: &Entry, ix: usize, q: &str, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let summary = snippet(&e.body, q);
+    fn search_row(&self, result: &SearchResult<'_>, ix: usize, q: &str, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (result_icon, info) = match result {
+            SearchResult::Document(e) => (entry_icon(e), result_info(e, q, snippet(&e.body, q), INFO_W, window)),
+            SearchResult::Feishu(e) => {
+                let icon = match &e.icon {
+                    Some(em) => div().flex_none().size(px(24.)).mr(px(10.)).flex().items_center().justify_center().text_size(px(20.)).child(em.clone()),
+                    None => doc_icon(),
+                };
+                let info = div().flex_1().min_w_0().flex().flex_col().overflow_hidden()
+                    .child(div().text_size(px(13.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD)
+                        .text_color(Theme::text()).overflow_hidden().whitespace_nowrap().text_ellipsis()
+                        .child(ui_text(e.name.clone()).hit(find_ci(&e.name, q), Theme::link())))
+                    .child(div().text_size(px(12.)).line_height(px(20.)).text_color(Theme::text_caption())
+                        .overflow_hidden().whitespace_nowrap().text_ellipsis()
+                        .child(format!("{} · {}", crate::settings::tr("飞书链接", "Feishu link"), e.url)));
+                (icon, info)
+            }
+        };
         // Result indices match keyboard selection.
         let row = ix;
         div()
@@ -311,8 +346,8 @@ impl Workspace {
                 }
             }))
             .on_click(cx.listener(move |w, _, window, cx| w.pick_search(row, window, cx)))
-            .child(entry_icon(e))
-            .child(result_info(e, q, summary, INFO_W, window))
+            .child(result_icon)
+            .child(info)
     }
 
     pub(crate) fn render_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -321,7 +356,7 @@ impl Workspace {
         }
         let q = self.query(cx);
         let has_text = !self.search.read(cx).text.is_empty();
-        let results: Vec<Entry> = self.search_results(cx).into_iter().cloned().collect();
+        let results = self.search_results(cx);
         let vh = f32::from(window.viewport_size().height);
 
         let input = div()
@@ -454,7 +489,44 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::snippet;
+    use super::{local_results, snippet, RECENT};
+    use crate::store::{Entry, Meta};
+
+    fn entry(id: &str, title: &str, body: &str, opened: u64, modified: u64) -> Entry {
+        Entry {
+            id: id.into(), title: title.into(), body: body.into(), icon: None,
+            meta: Meta { opened, modified, ..Default::default() },
+            reminders: Vec::new(), links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn local_search_prioritizes_titles_and_preserves_order_within_each_rank() {
+        let entries = vec![
+            entry("body1", "other", "NEEDLE", 0, 0),
+            entry("title1", "Needle one", "", 0, 0),
+            entry("body2", "another", "needle", 0, 0),
+            entry("title2", "NEEDLE two", "needle", 0, 0),
+            entry("miss", "other", "none", 0, 0),
+        ];
+        let ids: Vec<_> = local_results(&entries, "needle").iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["title1", "title2", "body1", "body2"]);
+    }
+
+    #[test]
+    fn recent_results_use_latest_open_or_modification_and_are_limited() {
+        let entries: Vec<_> = (0..RECENT + 2)
+            .map(|i| entry(&i.to_string(), "", "", i as u64, 0))
+            .collect();
+        let results = local_results(&entries, "");
+        assert_eq!(results.len(), RECENT);
+        assert_eq!(results[0].id, (RECENT + 1).to_string());
+        assert_eq!(results[RECENT - 1].id, "2");
+        let entries = vec![entry("opened", "", "", 5, 1), entry("modified", "", "", 0, 6)];
+        let ids: Vec<_> = local_results(&entries, "").iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, ["modified", "opened"]);
+    }
+
 
     #[test]
     fn snippet_context() {
